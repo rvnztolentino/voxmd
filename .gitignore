@@ -1,0 +1,40 @@
+# Local config and state — contain vault paths, personal names, and note content.
+# Deliberately never committed; see setup.md.
+voxmd.yaml
+voxmd.yml
+entities.json
+*.log
+state.json
+
+# Audio. Never commit memos.
+*.m4a
+*.mp3
+*.wav
+*.aac
+*.flac
+*.ogg
+*.opus
+*.aiff
+*.aif
+*.wma
+*.mp4
+*.mov
+
+# Model weights
+*.bin
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
