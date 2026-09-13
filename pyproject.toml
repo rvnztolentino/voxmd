@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voxmd"
+version = "0.1.0"
+description = "Voice memo to structured markdown notes. Fully local."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Pinned exactly, not ranged. Only the dependencies stage 1 actually uses are
+# here; ollama, jinja2, rapidfuzz and watchdog are added by the branches that
+# need them rather than declared speculatively up front.
+dependencies = [
+    "typer==0.27.2",
+    "pydantic==2.13.5",
+    "pyyaml==6.0.3",
+]
+
+[project.scripts]
+voxmd = "voxmd.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voxmd"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "PTH", "S"]
+# S603/S607 flag every subprocess call. voxmd's whole subprocess policy lives in
+# safe.run (list argv, never shell=True, mandatory timeout); blanket-ignoring
+# them here would defeat the point, so they are silenced only at that one call
+# site with an inline noqa that explains itself.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # assert is the point of a test
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

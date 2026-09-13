@@ -1,0 +1,34 @@
+# voxmd configuration
+#
+# Copy to ~/.config/voxmd/config.yaml (or ./voxmd.yaml) and edit.
+# Your real config is gitignored: it holds local paths.
+#
+# Only stage 1 (transcribe) settings exist so far. Sections for extraction,
+# the vault, and entities are added as those stages are built.
+
+whisper:
+  # Homebrew's whisper-cpp installs `whisper-cli`. Use an absolute path for a
+  # custom build.
+  binary: whisper-cli
+
+  # ggml weights. A 1.6 GB manual download; see setup.md.
+  model: ~/.local/share/voxmd/models/ggml-large-v3-turbo.bin
+
+  # ISO code such as `en`, or `auto` to detect per memo.
+  language: auto
+
+  # Omit to use the performance-core count, which is faster than using every
+  # core on Apple Silicon.
+  # threads: 4
+
+limits:
+  # Rejected before any processing starts.
+  max_audio_mb: 500
+  max_duration_min: 180
+
+  # Timeouts. whisper's scales with audio length:
+  #   max(whisper_timeout_floor_s, duration * whisper_timeout_factor)
+  ffprobe_timeout_s: 30
+  ffmpeg_timeout_s: 600
+  whisper_timeout_floor_s: 300
+  whisper_timeout_factor: 3.0
