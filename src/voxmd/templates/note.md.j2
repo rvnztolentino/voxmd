@@ -1,0 +1,50 @@
+{#
+  voxmd note template. Copy this file, edit it, and set render.template to the copy.
+
+  Every value is already escaped for markdown, and people/topics you know are
+  already [[wikilinks]]. Don't add escaping; don't remove the frontmatter block.
+
+    frontmatter  YAML for date, source, duration (ends with a newline)
+    title        string
+    summary      string, known people linked
+    decisions    list of strings, known people linked
+    actions      list of strings, known people linked
+    people       list of names, known ones as [[links]]
+    topics       list of topics, known ones as [[links]]
+    date, time   "2026-09-15", "14:03"
+    source       audio file name, or ""
+    duration     "3:25", or ""
+#}
+---
+{{ frontmatter }}---
+
+# {{ title }}
+
+{{ summary }}
+{% if decisions %}
+
+## Decisions
+
+{% for item in decisions %}
+- {{ item }}
+{% endfor %}
+{% endif %}
+{% if actions %}
+
+## Actions
+
+{% for item in actions %}
+- [ ] {{ item }}
+{% endfor %}
+{% endif %}
+{% if people or topics %}
+
+## Related
+
+{% if people %}
+- People: {{ people | join(", ") }}
+{% endif %}
+{% if topics %}
+- Topics: {{ topics | join(", ") }}
+{% endif %}
+{% endif %}

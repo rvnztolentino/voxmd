@@ -7,8 +7,8 @@ Resolution order, first hit wins:
 2. ``./voxmd.yaml``
 3. ``~/.config/voxmd/config.yaml``
 
-Config is **optional** so far. ``voxmd transcribe`` and ``voxmd extract`` run
-from CLI flags and defaults alone, so trying a stage on a real memo doesn't
+Config is **optional** so far. ``voxmd transcribe``, ``voxmd extract`` and
+``voxmd render`` run from CLI flags and defaults alone, so trying a stage on a real memo doesn't
 require writing a config file first. Sections are added by the stages that need
 them rather than being declared up front, so this file grows alongside the
 pipeline.
@@ -187,6 +187,39 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+class RenderConfig(BaseModel):
+    """Note rendering settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    template: Path | None = None
+    """A Jinja2 note template. ``None`` uses the built-in ``note.md.j2``: copy
+    that file and point this at the copy to change the note layout."""
+
+    @field_validator("template")
+    @classmethod
+    def _expand_template(cls, value: Path | None) -> Path | None:
+        return value.expanduser() if value is not None else None
+
+
+class EntitiesConfig(BaseModel):
+    """Known people and topics, used to build [[wikilinks]]."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file: Path = Field(default=Path("~/.config/voxmd/entities.json"), validate_default=True)
+    """A missing file is fine: nothing is linked until names are added."""
+
+    fuzzy_threshold: int = Field(default=90, ge=50, le=100)
+    """Similarity (0-100) at which a name counts as a known one. 90 merges
+    "Christopher"/"Christophor" but keeps "Marco"/"Marcus" apart."""
+
+    @field_validator("file")
+    @classmethod
+    def _expand_file(cls, value: Path) -> Path:
+        return value.expanduser()
+
+
 class LimitsConfig(BaseModel):
     """Ceilings and timeouts.
 
@@ -213,6 +246,24 @@ class LimitsConfig(BaseModel):
     """Whole request, model load included. keep_alive=0 means every memo loads."""
     ollama_connect_timeout_s: float = Field(default=5.0, gt=0)
 
+    max_extraction_kb: int = Field(default=256, ge=1)
+    """Largest extraction JSON ``voxmd render`` will read."""
+    max_template_kb: int = Field(default=64, ge=1)
+    max_entities_kb: int = Field(default=2048, ge=1)
+    """Largest entities.json. 2 MB holds tens of thousands of names."""
+
+    @property
+    def max_extraction_bytes(self) -> int:
+        return self.max_extraction_kb * 1024
+
+    @property
+    def max_template_bytes(self) -> int:
+        return self.max_template_kb * 1024
+
+    @property
+    def max_entities_bytes(self) -> int:
+        return self.max_entities_kb * 1024
+
     @property
     def max_audio_bytes(self) -> int:
         return self.max_audio_mb * 1024 * 1024
@@ -237,6 +288,8 @@ class Config(BaseModel):
 
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    render: RenderConfig = Field(default_factory=RenderConfig)
+    entities: EntitiesConfig = Field(default_factory=EntitiesConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
 
 

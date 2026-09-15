@@ -3,8 +3,8 @@
 # Copy to ~/.config/voxmd/config.yaml (or ./voxmd.yaml) and edit.
 # Your real config is gitignored: it holds local paths.
 #
-# Settings exist for stages 1 (transcribe) and 2 (extract) so far. Sections for
-# the vault and entities are added as those stages are built.
+# Settings exist for transcribe, extract and render so far. The vault section is
+# added when `voxmd process` is built.
 
 whisper:
   # Homebrew's whisper-cpp installs `whisper-cli`. Use an absolute path for a
@@ -42,11 +42,29 @@ ollama:
   # Not configurable, by design: the model is always unloaded after each call
   # (keep_alive 0) and thinking is always off.
 
+render:
+  # Jinja2 note template. Omit to use the built-in one; to customize, copy
+  # src/voxmd/templates/note.md.j2 somewhere, edit it, and point this at it.
+  template: ~/.config/voxmd/note.md.j2
+
+entities:
+  # Known people and topics, e.g. {"people": ["Marco"], "topics": ["release"]}.
+  # Known names become [[wikilinks]]. A missing file just means nothing is
+  # linked yet; `voxmd render --update-entities` creates and extends it.
+  file: ~/.config/voxmd/entities.json
+
+  # 0-100. How similar a name must be to count as a known one. 90 merges
+  # "Christopher"/"Christophor" but keeps "Marco"/"Marcus" apart.
+  fuzzy_threshold: 90
+
 limits:
   # Rejected before any processing starts.
   max_audio_mb: 500
   max_duration_min: 180
   max_transcript_kb: 512
+  max_extraction_kb: 256
+  max_template_kb: 64
+  max_entities_kb: 2048
 
   # Timeouts. whisper's scales with audio length:
   #   max(whisper_timeout_floor_s, duration * whisper_timeout_factor)

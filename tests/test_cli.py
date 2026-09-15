@@ -105,8 +105,9 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
     """Startup cost guard. If this fails, an import escaped a command body."""
     probe = (
         "import sys, voxmd.cli; "
-        "heavy = {'voxmd.config', 'voxmd.transcribe', 'voxmd.extract', "
-        "'pydantic', 'yaml', 'ollama', 'httpx'}; "
+        "heavy = {'voxmd.config', 'voxmd.transcribe', 'voxmd.extract', 'voxmd.schema', "
+        "'voxmd.render', 'voxmd.entities', "
+        "'pydantic', 'yaml', 'ollama', 'httpx', 'jinja2', 'rapidfuzz'}; "
         "loaded = sorted(heavy & set(sys.modules)); "
         "print(','.join(loaded))"
     )
@@ -187,3 +188,88 @@ def test_extract_refuses_a_remote_host_before_connecting(
 
     assert isinstance(result.exception, ConfigError)
     assert created == []
+
+
+# --- render -----------------------------------------------------------------
+
+
+def test_render_imports_neither_ollama_nor_httpx() -> None:
+    probe = "import sys, voxmd.render; print(sorted({'ollama', 'httpx'} & set(sys.modules)))"
+    result = subprocess.run(  # noqa: S603 - fixed argv, test only
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=30
+    )
+    assert result.stdout.strip() == "[]"
+
+
+def test_render_prints_only_the_note_and_writes_nothing(tmp_path: Path) -> None:
+    extraction = tmp_path / "memo.json"
+    extraction.write_text(json.dumps(VALID_EXTRACTION))
+
+    result = runner.invoke(
+        cli.app, ["render", str(extraction), "-s", "memo.m4a", "--date", "2026-09-15T14:03"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("---\ndate: 2026-09-15T14:03\nsource: memo.m4a\n---\n")
+    assert "# Ship date" in result.stdout
+    assert result.stderr == ""
+    assert not (tmp_path / "home" / ".config").exists()
+
+
+def test_render_reads_a_piped_extraction() -> None:
+    result = runner.invoke(cli.app, ["render"], input=json.dumps(VALID_EXTRACTION))
+
+    assert result.exit_code == 0, result.output
+    assert "- [ ] Email the client" in result.stdout
+
+
+def test_render_links_known_entities_and_saves_new_ones_only_when_asked(tmp_path: Path) -> None:
+    entities = tmp_path / "entities.json"
+    entities.write_text('{"people": ["Marco"]}')
+    payload = json.dumps(VALID_EXTRACTION)
+
+    first = runner.invoke(cli.app, ["render", "-e", str(entities)], input=payload)
+    assert "- People: [[Marco]], Ana" in first.stdout
+    assert json.loads(entities.read_text()) == {"people": ["Marco"]}
+
+    second = runner.invoke(
+        cli.app, ["render", "-e", str(entities), "--update-entities"], input=payload
+    )
+    assert second.exit_code == 0, second.output
+    assert json.loads(entities.read_text()) == {"people": ["Marco", "Ana"], "topics": ["release"]}
+
+    third = runner.invoke(cli.app, ["render", "-e", str(entities)], input=payload)
+    assert "- People: [[Marco]], [[Ana]]" in third.stdout
+
+
+def test_render_verbose_prints_counts_but_no_names(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["render", "-v"], input=json.dumps(VALID_EXTRACTION))
+
+    assert result.exit_code == 0, result.output
+    assert "new:      2 people, 1 topics" in result.stderr
+    assert "Ana" not in result.stderr
+    assert "Marco" not in result.stderr
+
+
+def test_render_template_flag_overrides_config(tmp_path: Path) -> None:
+    (tmp_path / "config.md.j2").write_text("config {{ title }}")
+    (tmp_path / "flag.md.j2").write_text("flag {{ title }}")
+    (tmp_path / "voxmd.yaml").write_text(f"render:\n  template: {tmp_path / 'config.md.j2'}\n")
+    payload = json.dumps(VALID_EXTRACTION)
+
+    from_config = runner.invoke(cli.app, ["render"], input=payload)
+    from_flag = runner.invoke(
+        cli.app, ["render", "-t", str(tmp_path / "flag.md.j2")], input=payload
+    )
+
+    assert from_config.stdout == "config Ship date\n"
+    assert from_flag.stdout == "flag Ship date\n"
+
+
+def test_render_rejects_a_bad_date_before_reading_input() -> None:
+    from voxmd.errors import InputError
+
+    result = runner.invoke(cli.app, ["render", "--date", "soon"], input="not json")
+
+    assert isinstance(result.exception, InputError)
+    assert "ISO 8601" in str(result.exception)

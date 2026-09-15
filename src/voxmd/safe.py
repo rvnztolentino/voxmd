@@ -16,12 +16,17 @@ Two rules are enforced here and nowhere else:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Iterable, Sequence
+import tempfile
+import time
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import IO
 
 from .errors import AudioError, DependencyError, InputError, ToolFailure, ToolTimeout
 
@@ -147,3 +152,114 @@ def resolve_input_file(
         raise error(f"Not readable: {resolved}")
 
     return resolved
+
+
+def read_text_input(
+    source: Path | str | None,
+    *,
+    allowed_suffixes: Iterable[str],
+    max_bytes: int,
+    stdin: IO[str] | None,
+    what: str,
+    limit_setting: str,
+    no_input_message: str,
+) -> str:
+    """Read UTF-8 text from a file, or from stdin when ``source`` is None or ``-``.
+
+    ``what`` names the input in messages ("transcript", "extraction"). Reads are
+    bounded even after the size check, because a file can grow in between and
+    a pipe has no size to check.
+    """
+    if source is None or str(source) == "-":
+        data = _read_stdin(stdin, max_bytes, no_input_message)
+        label = "stdin"
+    else:
+        path = resolve_input_file(
+            source,
+            allowed_suffixes=allowed_suffixes,
+            max_bytes=max_bytes,
+            error=InputError,
+            limit_setting=limit_setting,
+        )
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+        label = path.name
+
+    if len(data) > max_bytes:
+        raise InputError(
+            f"{label} is over the {human_bytes(max_bytes)} {what} limit.\n"
+            f"Raise {limit_setting} in your config if this is expected."
+        )
+    if b"\x00" in data:
+        raise InputError(f"{label} looks like binary data, not a {what}.")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise InputError(f"{label} is not UTF-8 text.") from exc
+
+
+def _read_stdin(stdin: IO[str] | None, max_bytes: int, no_input_message: str) -> bytes:
+    if stdin is None or stdin.isatty():
+        # Reading a terminal would sit waiting for input the user doesn't know
+        # is expected.
+        raise InputError(no_input_message)
+    buffer = getattr(stdin, "buffer", None)
+    if buffer is not None:
+        return buffer.read(max_bytes + 1)
+    return stdin.read(max_bytes + 1).encode("utf-8")
+
+
+def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
+    """Replace ``path`` so readers see the old file or the new one, never half of either.
+
+    The temp file sits beside the target, so the rename stays on one filesystem
+    and is atomic. It is flushed to disk before the rename, and the directory
+    after it, so a crash can't leave an empty file behind. Mode defaults to
+    0600: voxmd's files hold names and memo content.
+    """
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.chmod(mode)
+        temp.replace(path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, *, timeout_s: float, what: str) -> Iterator[None]:
+    """Hold an exclusive advisory lock on ``path``, created 0600 if missing.
+
+    Waits at most ``timeout_s``: the holder is another short voxmd run, and one
+    that hung must not hang this one too. The retry loop only runs while the
+    lock is actually contended. ``O_NOFOLLOW`` stops a planted symlink from
+    making voxmd create a file somewhere else.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ToolTimeout(
+                        f"{what} is locked by another voxmd process; "
+                        f"gave up after {timeout_s:.0f}s."
+                    ) from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)  # Closing the descriptor releases the lock.

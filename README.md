@@ -4,7 +4,7 @@ Voice memo → structured markdown notes. Fully local. CLI only.
 
 Drop an audio file in, get a linked note in an Obsidian vault. No cloud, no API keys, no cost.
 
-> **Status:** stage 2 of 6. `voxmd transcribe` and `voxmd extract` work; rendering, the vault, and watch mode are not built yet.
+> **Status:** stage 4 of 6. `voxmd transcribe`, `voxmd extract`, and `voxmd render` work; writing notes into the vault (`voxmd process`) and watch mode are not built yet.
 
 ## Requirements
 
@@ -47,7 +47,26 @@ voxmd transcribe memo.m4a | voxmd extract
 
 Prints JSON with `title`, `summary`, `decisions`, `actions`, `people`, and `topics`. It uses one Ollama call, constrained to that schema, with one retry if the reply doesn't validate. `-m` picks another model and `-v` prints tokens and timing to stderr. If a transcript is too long for `ollama.num_ctx`, it is cut to fit and a warning is printed.
 
-A config file is optional for both commands. See [`voxmd.example.yaml`](voxmd.example.yaml); voxmd looks in `$VOXMD_CONFIG`, then `./voxmd.yaml`, then `~/.config/voxmd/config.yaml`. CLI flags override config.
+### Render
+
+```sh
+voxmd extract memo.txt | voxmd render --source memo.m4a --duration 205
+voxmd render memo.json -v
+```
+
+Prints a markdown note: YAML frontmatter (`date`, `source`, `duration`), the title, the summary, decisions, actions as `- [ ]` checkboxes, and related people and topics. `--date` sets when the memo was recorded (ISO 8601; defaults to now). Nothing is written unless you pass `--update-entities`.
+
+**Template.** The layout lives in [`src/voxmd/templates/note.md.j2`](src/voxmd/templates/note.md.j2), which lists the variables it receives. Copy it, edit the copy, and set `render.template` or pass `--template`.
+
+**Entities.** `~/.config/voxmd/entities.json` lists the people and topics you know:
+
+```json
+{"people": ["Marco", "Ana"], "topics": ["release"]}
+```
+
+Known names become `[[wikilinks]]`: in the People and Topics lists, and for people also wherever they're mentioned in the summary, decisions, and actions. Matching ignores case, accents, and punctuation, and tolerates a small spelling slip in a longer name ("Christophor" links to `[[Christopher]]`) without merging different short names ("Marcus" stays apart from "Marco"). Names that aren't in the file stay plain text; `--update-entities` appends them so they link next time. Existing entries are never rewritten, and a malformed file is refused rather than overwritten.
+
+A config file is optional for every command. See [`voxmd.example.yaml`](voxmd.example.yaml); voxmd looks in `$VOXMD_CONFIG`, then `./voxmd.yaml`, then `~/.config/voxmd/config.yaml`. CLI flags override config.
 
 ## What it does and doesn't do
 
@@ -63,11 +82,14 @@ These are commitments, not aspirations.
 
 **It never holds two models in memory.** whisper runs as a subprocess and exits before Ollama is asked to load anything. Every Ollama call passes `keep_alive=0`, so the model unloads as soon as it answers, and a failed request sends an explicit unload. This costs a few seconds of model load per memo in exchange for voxmd occupying no memory between memos.
 
+**Model output can't reshape a note.** Everything the model writes is escaped before it reaches the template, so a memo can't inject links, embeds, `%%` comments, tags, or raw HTML (an `<img>` would load a remote URL when the note is opened). Frontmatter is written with `yaml.safe_dump`, wikilinks are built only from entity names, and the template runs in Jinja's sandbox.
+
 **Your data stays on disk, unencrypted.** Transcripts and notes are plaintext files. voxmd's logs record filenames, timings, and outcomes, never what was said. Error messages never include transcript text or model output.
 
 ## Resource usage
 
-- `voxmd --help` starts in under 0.1s; Ollama, httpx, and pydantic are only imported by the commands that use them.
+- `voxmd --help` starts in under 0.1s; Ollama, httpx, pydantic, jinja2, and rapidfuzz are only imported by the commands that use them.
+- `voxmd render` runs in about 0.12s and never imports the Ollama client. Name lookups are a dict hit; rapidfuzz only runs when a name isn't an exact match, and such a lookup against 10,000 known names takes about 3 ms.
 - `voxmd extract` sizes the context window to the transcript, so a short memo uses a 4k-token window instead of the 16k ceiling. qwen3:8b needs roughly 5–6 GB while loaded, and nothing between memos.
 - Idle CPU for watch mode will be measured and recorded here once watch mode exists. Not an estimate; a measurement.
 

@@ -40,25 +40,31 @@ import contextlib
 import math
 import re
 import time
-import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 import httpx
 import ollama
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import ValidationError
 
 from . import safe
 from .config import LimitsConfig, OllamaConfig
 from .errors import DependencyError, InputError, ToolFailure, ToolTimeout
 
-TEXT_SUFFIXES = frozenset({".txt", ".md", ".text"})
+# The schema and its string cleaning live in schema.py so render can use them
+# without importing ollama. Re-exported here for callers of this module.
+from .schema import (  # noqa: F401
+    MAX_ITEM_CHARS,
+    MAX_ITEMS,
+    MAX_SUMMARY_CHARS,
+    MAX_TITLE_CHARS,
+    Extraction,
+    clean_text,
+    describe_errors,
+)
 
-MAX_TITLE_CHARS = 120
-MAX_SUMMARY_CHARS = 2_000
-MAX_ITEM_CHARS = 300
-MAX_ITEMS = 50
+TEXT_SUFFIXES = frozenset({".txt", ".md", ".text"})
 
 # Token estimates for sizing the context window. English averages about four
 # characters per token; three over-counts on purpose, so the estimate errs
@@ -103,78 +109,8 @@ TRANSCRIPT_REMINDER = (
     "Extract the fields as the system message describes."
 )
 
-# Unicode categories removed from every extracted string: control characters,
-# format characters (zero-width joiners, bidi overrides that can make a note
-# display text in a different order than it is stored) and lone surrogates.
-_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
-# Leading list syntax a model sometimes adds itself: "- ", "* ", "1. ", "[ ] ".
-# A bare "-" needs a following space, so "-5 degrees" keeps its sign.
-_LIST_MARKER = re.compile(r"^(?:[-*+•]\s+|\d{1,3}[.)]\s+|\[[ xX]?\]\s*)+")
 # Anything that could close (or reopen) the transcript delimiter from inside.
 _TRANSCRIPT_TAG = re.compile(r"<(\s*/?\s*transcript)", re.IGNORECASE)
-_WHITESPACE = re.compile(r"\s+")
-
-
-def clean_text(value: str, *, limit: int) -> str:
-    """Collapse a model-produced string to one clean, bounded line."""
-    text = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", value))
-    text = "".join(ch for ch in text if unicodedata.category(ch) not in _INVISIBLE_CATEGORIES)
-    text = text.strip()
-    if len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
-    return text
-
-
-def _clean_items(values: list[str]) -> list[str]:
-    """Clean, de-duplicate case-insensitively, drop empties, and cap a list."""
-    seen: set[str] = set()
-    items: list[str] = []
-    for value in values:
-        item = clean_text(_LIST_MARKER.sub("", value.strip()), limit=MAX_ITEM_CHARS)
-        key = item.casefold()
-        if not item or key in seen:
-            continue
-        seen.add(key)
-        items.append(item)
-        if len(items) == MAX_ITEMS:
-            break
-    return items
-
-
-class Extraction(BaseModel):
-    """Structured note content. Its JSON schema is also the model's output grammar."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    title: str = Field(description="Short descriptive title, at most 8 words.")
-    summary: str = Field(description="Two to four sentence summary of the memo.")
-    decisions: list[str] = Field(description="Decisions that were made. Empty if none.")
-    actions: list[str] = Field(
-        description="Concrete follow-up tasks, each starting with a verb. Empty if none."
-    )
-    people: list[str] = Field(description="Names of people mentioned. Empty if none.")
-    topics: list[str] = Field(description="One to five short topic names.")
-
-    @field_validator("title")
-    @classmethod
-    def _clean_title(cls, value: str) -> str:
-        cleaned = clean_text(value, limit=MAX_TITLE_CHARS).rstrip(".")
-        if not cleaned:
-            raise ValueError("title is empty")
-        return cleaned
-
-    @field_validator("summary")
-    @classmethod
-    def _clean_summary(cls, value: str) -> str:
-        cleaned = clean_text(value, limit=MAX_SUMMARY_CHARS)
-        if not cleaned:
-            raise ValueError("summary is empty")
-        return cleaned
-
-    @field_validator("decisions", "actions", "people", "topics")
-    @classmethod
-    def _clean_lists(cls, values: list[str]) -> list[str]:
-        return _clean_items(values)
 
 
 # Computed once: it is sent on every call, retries included.
@@ -205,47 +141,18 @@ def read_transcript(
     stdin: IO[str] | None = None,
 ) -> str:
     """Read a transcript from a text file, or from stdin when ``source`` is None or ``-``."""
-    if source is None or str(source) == "-":
-        data = _read_stdin(stdin, max_bytes)
-        label = "stdin"
-    else:
-        path = safe.resolve_input_file(
-            source,
-            allowed_suffixes=TEXT_SUFFIXES,
-            max_bytes=max_bytes,
-            error=InputError,
-            limit_setting="limits.max_transcript_kb",
-        )
-        with path.open("rb") as handle:
-            # Bounded even after the size check: the file can grow in between.
-            data = handle.read(max_bytes + 1)
-        label = path.name
-
-    if len(data) > max_bytes:
-        raise InputError(
-            f"{label} is over the {safe.human_bytes(max_bytes)} transcript limit.\n"
-            "Raise limits.max_transcript_kb in your config if this is expected."
-        )
-    if b"\x00" in data:
-        raise InputError(f"{label} looks like binary data, not a transcript.")
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise InputError(f"{label} is not UTF-8 text.") from exc
-
-
-def _read_stdin(stdin: IO[str] | None, max_bytes: int) -> bytes:
-    if stdin is None or stdin.isatty():
-        # Reading a terminal would sit waiting for input the user doesn't know
-        # is expected.
-        raise InputError(
+    return safe.read_text_input(
+        source,
+        allowed_suffixes=TEXT_SUFFIXES,
+        max_bytes=max_bytes,
+        stdin=stdin,
+        what="transcript",
+        limit_setting="limits.max_transcript_kb",
+        no_input_message=(
             "No transcript given. Pass a file, or pipe one in:\n"
             "  voxmd transcribe memo.m4a | voxmd extract"
-        )
-    buffer = getattr(stdin, "buffer", None)
-    if buffer is not None:
-        return buffer.read(max_bytes + 1)
-    return stdin.read(max_bytes + 1).encode("utf-8")
+        ),
+    )
 
 
 def make_client(host: str, *, timeout_s: float, connect_timeout_s: float) -> ollama.Client:
@@ -436,7 +343,7 @@ def _parse(
     try:
         return Extraction.model_validate_json(content), ""
     except ValidationError as exc:
-        return None, _describe(exc)
+        return None, describe_errors(exc)
 
 
 def _retry_messages(content: str, problem: str) -> list[dict[str, str]]:
@@ -474,15 +381,6 @@ def _unload_after_failure(
         unloader.generate(model=cfg.model, prompt="", keep_alive=0)
     if unloader is not client:
         unloader.close()
-
-
-def _describe(exc: ValidationError) -> str:
-    """Field locations and messages only. Input values could be memo content."""
-    parts = []
-    for err in exc.errors()[:3]:
-        location = ".".join(str(part) for part in err["loc"]) or "reply"
-        parts.append(f"{location}: {err['msg']}")
-    return "; ".join(parts)
 
 
 def _short(text: str, *, limit: int = 300) -> str:

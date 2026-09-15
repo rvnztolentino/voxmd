@@ -192,6 +192,135 @@ def extract(
     print(result.extraction.model_dump_json(indent=2))
 
 
+@app.command()
+def render(
+    extraction: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Extraction JSON from voxmd extract. Reads stdin when omitted or '-'.",
+            show_default=False,
+        ),
+    ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            "--source",
+            "-s",
+            help="Audio file the memo came from. Only its name is recorded.",
+            show_default=False,
+        ),
+    ] = None,
+    duration: Annotated[
+        float | None,
+        typer.Option(
+            "--duration", "-d", min=0, help="Recording length in seconds.", show_default=False
+        ),
+    ] = None,
+    date: Annotated[
+        str | None,
+        typer.Option(
+            "--date",
+            help="When the memo was recorded, ISO 8601 (2026-09-15T14:03). Defaults to now.",
+            show_default=False,
+        ),
+    ] = None,
+    template: Annotated[
+        Path | None,
+        typer.Option(
+            "--template",
+            "-t",
+            help="Jinja2 note template. Overrides render.template in config.",
+            show_default=False,
+        ),
+    ] = None,
+    entities: Annotated[
+        Path | None,
+        typer.Option(
+            "--entities",
+            "-e",
+            help="Known people and topics. Overrides entities.file in config.",
+            show_default=False,
+        ),
+    ] = None,
+    update_entities: Annotated[
+        bool,
+        typer.Option(
+            "--update-entities",
+            help="Append people and topics not yet in the entities file.",
+        ),
+    ] = False,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Print template and entity details to stderr."),
+    ] = False,
+) -> None:
+    """Render an extraction as a markdown note with YAML frontmatter.
+
+    Pipes from extract: voxmd extract memo.txt | voxmd render --source memo.m4a
+
+    Prints the note to stdout. Writes nothing unless --update-entities is given.
+    """
+    from .config import apply_overrides, load_config
+    from .entities import load_entities
+    from .entities import update_entities as save_new_entities
+    from .render import NoteMeta, load_template, parse_date, read_extraction, render_note
+
+    settings = load_config(config)
+    limits = settings.limits
+    render_cfg = apply_overrides(settings.render, template=template)
+    entities_cfg = apply_overrides(settings.entities, file=entities)
+    created = parse_date(date)
+
+    note_input = read_extraction(extraction, max_bytes=limits.max_extraction_bytes, stdin=sys.stdin)
+    compiled, label = load_template(render_cfg.template, max_bytes=limits.max_template_bytes)
+    known = load_entities(
+        entities_cfg.file,
+        max_bytes=limits.max_entities_bytes,
+        threshold=entities_cfg.fuzzy_threshold,
+    )
+    result = render_note(
+        note_input,
+        meta=NoteMeta(created=created, source=source, duration_s=duration),
+        entities=known,
+        template=compiled,
+        template_label=label,
+    )
+
+    added = 0
+    if update_entities:
+        added = save_new_entities(
+            entities_cfg.file,
+            people=result.people.new,
+            topics=result.topics.new,
+            max_bytes=limits.max_entities_bytes,
+            threshold=entities_cfg.fuzzy_threshold,
+        )
+
+    if verbose:
+        # Counts only: names are personal, and stderr may end up in a log.
+        _note(f"template: {label}")
+        _note(f"entities: {known.path}{'' if known.exists else ' (not found)'}")
+        _note(f"linked:   {len(result.people.links)} people, {len(result.topics.links)} topics")
+        new = f"{len(result.people.new)} people, {len(result.topics.new)} topics"
+        if update_entities:
+            _note(f"new:      {new}, {added} added to the entities file")
+        else:
+            _note(f"new:      {new} (pass --update-entities to save them)")
+
+    # Only the note goes to stdout.
+    print(result.markdown, end="")
+
+
 def _note(message: str) -> None:
     typer.secho(message, fg=typer.colors.BRIGHT_BLACK, err=True)
 

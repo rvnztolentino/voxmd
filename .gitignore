@@ -3,6 +3,7 @@
 voxmd.yaml
 voxmd.yml
 entities.json
+.entities.json.lock
 *.log
 state.json
 

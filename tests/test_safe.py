@@ -14,6 +14,68 @@ from voxmd.errors import AudioError, DependencyError, ToolTimeout
 AUDIO = {".m4a", ".wav"}
 
 
+class TestAtomicWriteText:
+    def test_writes_a_private_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+
+        safe.atomic_write_text(path, "hi\n")
+
+        assert path.read_text() == "hi\n"
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_replaces_the_old_file_and_leaves_no_temp_files(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        path.write_text("old")
+
+        safe.atomic_write_text(path, "new")
+
+        assert path.read_text() == "new"
+        assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+    def test_a_failed_write_keeps_the_old_content(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "state.json"
+        path.write_text("old")
+
+        def fail(fd: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fsync", fail)
+        with pytest.raises(OSError, match="disk full"):
+            safe.atomic_write_text(path, "new")
+
+        assert path.read_text() == "old"
+        assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
+class TestFileLock:
+    def test_a_second_holder_times_out(self, tmp_path: Path) -> None:
+        lock = tmp_path / "x.lock"
+        with (
+            safe.file_lock(lock, timeout_s=1, what="x"),
+            pytest.raises(ToolTimeout, match="locked"),
+            safe.file_lock(lock, timeout_s=0.1, what="x"),
+        ):
+            pass
+
+    def test_the_lock_is_released_on_exit(self, tmp_path: Path) -> None:
+        lock = tmp_path / "x.lock"
+        with safe.file_lock(lock, timeout_s=1, what="x"):
+            pass
+        with safe.file_lock(lock, timeout_s=0.1, what="x"):
+            pass
+
+    def test_a_planted_symlink_is_not_followed(self, tmp_path: Path) -> None:
+        target = tmp_path / "elsewhere"
+        link = tmp_path / "x.lock"
+        link.symlink_to(target)
+
+        with pytest.raises(OSError), safe.file_lock(link, timeout_s=0.1, what="x"):
+            pass
+        assert not target.exists()
+
+
 class TestRun:
     def test_arguments_are_never_interpreted_by_a_shell(self) -> None:
         # If any shell touched this, the substitutions would expand and the
