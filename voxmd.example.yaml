@@ -3,8 +3,8 @@
 # Copy to ~/.config/voxmd/config.yaml (or ./voxmd.yaml) and edit.
 # Your real config is gitignored: it holds local paths.
 #
-# Only stage 1 (transcribe) settings exist so far. Sections for extraction,
-# the vault, and entities are added as those stages are built.
+# Settings exist for stages 1 (transcribe) and 2 (extract) so far. Sections for
+# the vault and entities are added as those stages are built.
 
 whisper:
   # Homebrew's whisper-cpp installs `whisper-cli`. Use an absolute path for a
@@ -21,10 +21,32 @@ whisper:
   # core on Apple Silicon.
   # threads: 4
 
+ollama:
+  # Must be loopback (127.0.0.1, ::1, or localhost). Anything else is refused:
+  # transcripts never leave this machine.
+  host: http://127.0.0.1:11434
+
+  # Pull it first: `ollama pull qwen3:8b`
+  model: qwen3:8b
+
+  # Low, so the extraction stays faithful to what was said.
+  temperature: 0.1
+
+  # Context window ceiling in tokens. Each memo gets the smallest window that
+  # fits it, up to this. Longer transcripts are cut to fit, with a warning.
+  num_ctx: 16384
+
+  # Longest reply, in tokens.
+  num_predict: 2048
+
+  # Not configurable, by design: the model is always unloaded after each call
+  # (keep_alive 0) and thinking is always off.
+
 limits:
   # Rejected before any processing starts.
   max_audio_mb: 500
   max_duration_min: 180
+  max_transcript_kb: 512
 
   # Timeouts. whisper's scales with audio length:
   #   max(whisper_timeout_floor_s, duration * whisper_timeout_factor)
@@ -32,3 +54,7 @@ limits:
   ffmpeg_timeout_s: 600
   whisper_timeout_floor_s: 300
   whisper_timeout_factor: 3.0
+
+  # Whole Ollama request, model load included.
+  ollama_timeout_s: 600
+  ollama_connect_timeout_s: 5

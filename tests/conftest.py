@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import ollama
 import pytest
 
 from voxmd import safe
@@ -124,3 +125,64 @@ def probe_json(
 
 
 WHISPER_READY = {"sample_rate": 16_000, "channels": 1, "codec": "pcm_s16le"}
+
+
+VALID_EXTRACTION = {
+    "title": "Ship date",
+    "summary": "Marco and Ana agreed to ship on Friday.",
+    "decisions": ["Ship on Friday"],
+    "actions": ["Email the client"],
+    "people": ["Marco", "Ana"],
+    "topics": ["release"],
+}
+
+
+def chat_reply(
+    content: str | dict[str, object] | None = None,
+    *,
+    done_reason: str = "stop",
+    prompt_tokens: int = 120,
+    output_tokens: int = 60,
+) -> ollama.ChatResponse:
+    """A real ollama ChatResponse, so attribute access matches production."""
+    if content is None:
+        content = VALID_EXTRACTION
+    if isinstance(content, dict):
+        content = json.dumps(content)
+    return ollama.ChatResponse(
+        model="qwen3:8b",
+        done=True,
+        done_reason=done_reason,
+        message=ollama.Message(role="assistant", content=content),
+        prompt_eval_count=prompt_tokens,
+        eval_count=output_tokens,
+        load_duration=2_000_000_000,
+        total_duration=5_000_000_000,
+    )
+
+
+@dataclass
+class FakeClient:
+    """Stand-in for ollama.Client. Replies are returned, or raised, in order."""
+
+    replies: list[object] = field(default_factory=list)
+    unload_error: BaseException | None = None
+    chats: list[dict[str, object]] = field(default_factory=list)
+    unloads: list[dict[str, object]] = field(default_factory=list)
+    closed: bool = False
+
+    def chat(self, **kwargs: object) -> object:
+        self.chats.append(kwargs)
+        reply = self.replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    def generate(self, **kwargs: object) -> ollama.GenerateResponse:
+        self.unloads.append(kwargs)
+        if self.unload_error is not None:
+            raise self.unload_error
+        return ollama.GenerateResponse(done_reason="unload")
+
+    def close(self) -> None:
+        self.closed = True

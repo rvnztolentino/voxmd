@@ -117,6 +117,81 @@ def transcribe(
     print(result.text)
 
 
+@app.command()
+def extract(
+    transcript: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Transcript text file. Reads stdin when omitted or '-'.",
+            show_default=False,
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Ollama model name. Overrides ollama.model in config.",
+            show_default=False,
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Print model, token, and timing details to stderr."),
+    ] = False,
+) -> None:
+    """Extract title, summary, decisions, actions, people, and topics as JSON.
+
+    Pipes from transcribe: voxmd transcribe memo.m4a | voxmd extract
+
+    Talks only to Ollama on localhost, and unloads the model when done.
+    """
+    from .config import apply_overrides, load_config
+    from .extract import extract as run_extract
+    from .extract import read_transcript
+
+    settings = load_config(config)
+    ollama_cfg = apply_overrides(settings.ollama, model=model)
+    text = read_transcript(
+        transcript, max_bytes=settings.limits.max_transcript_bytes, stdin=sys.stdin
+    )
+
+    if verbose:
+        _note(f"model:    {ollama_cfg.model} @ {ollama_cfg.host}")
+
+    result = run_extract(text, ollama_cfg=ollama_cfg, limits=settings.limits)
+
+    if result.truncated:
+        typer.secho(
+            f"voxmd: warning: the transcript may have been truncated to fit "
+            f"ollama.num_ctx ({ollama_cfg.num_ctx}); the end of the memo may be missing. "
+            "Raise ollama.num_ctx to include it.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    if verbose:
+        _note(f"attempts: {result.attempts}")
+        _note(
+            f"context:  {result.num_ctx} tokens "
+            f"({result.prompt_tokens} prompt, {result.output_tokens} output)"
+        )
+        _note(f"load:     {result.load_seconds:.1f}s")
+        _note(f"total:    {result.seconds:.1f}s")
+
+    # Only the JSON goes to stdout.
+    print(result.extraction.model_dump_json(indent=2))
+
+
 def _note(message: str) -> None:
     typer.secho(message, fg=typer.colors.BRIGHT_BLACK, err=True)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -9,8 +10,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import FakeRunner, probe_json
+from conftest import VALID_EXTRACTION, FakeClient, FakeRunner, chat_reply, probe_json
 from voxmd import cli
+from voxmd import extract as extract_module
 from voxmd.config import CONFIG_ENV_VAR
 
 runner = CliRunner()
@@ -103,7 +105,8 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
     """Startup cost guard. If this fails, an import escaped a command body."""
     probe = (
         "import sys, voxmd.cli; "
-        "heavy = {'voxmd.config', 'voxmd.transcribe', 'pydantic', 'yaml'}; "
+        "heavy = {'voxmd.config', 'voxmd.transcribe', 'voxmd.extract', "
+        "'pydantic', 'yaml', 'ollama', 'httpx'}; "
         "loaded = sorted(heavy & set(sys.modules)); "
         "print(','.join(loaded))"
     )
@@ -111,3 +114,76 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=30
     )
     assert result.stdout.strip() == "", f"imported at startup: {result.stdout.strip()}"
+
+
+# --- extract ----------------------------------------------------------------
+
+
+@pytest.fixture
+def ollama_client(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
+    client = FakeClient([chat_reply()])
+    monkeypatch.setattr(extract_module, "make_client", lambda *args, **kwargs: client)
+    return client
+
+
+def test_extract_prints_only_json_to_stdout(ollama_client: FakeClient, tmp_path: Path) -> None:
+    transcript = tmp_path / "memo.txt"
+    transcript.write_text("Marco and Ana agreed to ship Friday.")
+
+    result = runner.invoke(cli.app, ["extract", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == VALID_EXTRACTION
+    assert result.stderr == ""
+
+
+def test_extract_reads_a_piped_transcript(ollama_client: FakeClient) -> None:
+    result = runner.invoke(cli.app, ["extract"], input="Marco and Ana agreed.")
+
+    assert result.exit_code == 0, result.output
+    assert "Marco and Ana agreed." in ollama_client.chats[0]["messages"][1]["content"]
+
+
+def test_extract_model_flag_overrides_config(ollama_client: FakeClient, tmp_path: Path) -> None:
+    (tmp_path / "voxmd.yaml").write_text("ollama:\n  model: gemma3:4b\n")
+
+    result = runner.invoke(cli.app, ["extract", "-m", "llama3.2:3b"], input="hi there")
+
+    assert result.exit_code == 0, result.output
+    assert ollama_client.chats[0]["model"] == "llama3.2:3b"
+
+
+def test_extract_verbose_details_go_to_stderr_only(ollama_client: FakeClient) -> None:
+    result = runner.invoke(cli.app, ["extract", "-v"], input="hi there")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == VALID_EXTRACTION
+    assert "attempts: 1" in result.stderr
+
+
+def test_extract_warns_on_stderr_when_the_transcript_did_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient([chat_reply(prompt_tokens=100_000)])
+    monkeypatch.setattr(extract_module, "make_client", lambda *args, **kwargs: client)
+
+    result = runner.invoke(cli.app, ["extract"], input="hi there")
+
+    assert result.exit_code == 0, result.output
+    assert "truncated" in result.stderr
+    assert json.loads(result.stdout) == VALID_EXTRACTION
+
+
+def test_extract_refuses_a_remote_host_before_connecting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voxmd.errors import ConfigError
+
+    (tmp_path / "voxmd.yaml").write_text("ollama:\n  host: http://10.0.0.5:11434\n")
+    created: list[object] = []
+    monkeypatch.setattr(extract_module, "make_client", lambda *args, **kwargs: created.append(1))
+
+    result = runner.invoke(cli.app, ["extract"], input="hi there")
+
+    assert isinstance(result.exception, ConfigError)
+    assert created == []

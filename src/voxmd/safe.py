@@ -23,7 +23,7 @@ import subprocess
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from .errors import AudioError, DependencyError, ToolFailure, ToolTimeout
+from .errors import AudioError, DependencyError, InputError, ToolFailure, ToolTimeout
 
 
 def human_bytes(n: int) -> str:
@@ -96,8 +96,13 @@ def resolve_input_file(
     *,
     allowed_suffixes: Iterable[str],
     max_bytes: int,
+    error: type[InputError] = AudioError,
+    limit_setting: str = "limits.max_audio_mb",
 ) -> Path:
     """Validate a caller-supplied input file and return its resolved path.
+
+    ``error`` and ``limit_setting`` let non-audio inputs (transcripts) reuse the
+    same checks with their own error type and config key.
 
     Checks are ordered cheapest-first so an obviously wrong input fails before
     anything expensive happens.
@@ -114,31 +119,31 @@ def resolve_input_file(
         resolved = candidate.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         # RuntimeError covers a symlink loop.
-        raise AudioError(f"No such file: {candidate}") from exc
+        raise error(f"No such file: {candidate}") from exc
 
     info = resolved.stat()
     if not stat.S_ISREG(info.st_mode):
-        raise AudioError(f"Not a regular file: {resolved}")
+        raise error(f"Not a regular file: {resolved}")
 
     suffixes = {s.lower() for s in allowed_suffixes}
     if resolved.suffix.lower() not in suffixes:
         supported = ", ".join(sorted(suffixes))
-        raise AudioError(
+        raise error(
             f"Unsupported file type {resolved.suffix or '(none)'!r}: {resolved.name}\n"
             f"Supported: {supported}"
         )
 
     if info.st_size == 0:
-        raise AudioError(f"File is empty: {resolved}")
+        raise error(f"File is empty: {resolved}")
 
     if info.st_size > max_bytes:
-        raise AudioError(
+        raise error(
             f"{resolved.name} is {human_bytes(info.st_size)}, over the "
             f"{human_bytes(max_bytes)} limit.\n"
-            "Raise limits.max_audio_mb in your config if this is expected."
+            f"Raise {limit_setting} in your config if this is expected."
         )
 
     if not os.access(resolved, os.R_OK):
-        raise AudioError(f"Not readable: {resolved}")
+        raise error(f"Not readable: {resolved}")
 
     return resolved

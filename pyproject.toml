@@ -10,13 +10,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
-# Pinned exactly, not ranged. Only the dependencies stage 1 actually uses are
-# here; ollama, jinja2, rapidfuzz and watchdog are added by the branches that
-# need them rather than declared speculatively up front.
+# Pinned exactly, not ranged. Only the dependencies the built stages use are
+# here; jinja2, rapidfuzz and watchdog are added by the branches that need them
+# rather than declared speculatively up front. httpx is ollama's transport and
+# is imported directly (timeouts, error types), so it is pinned here too.
 dependencies = [
     "typer==0.27.2",
     "pydantic==2.13.5",
     "pyyaml==6.0.3",
+    "ollama==0.6.2",
+    "httpx==0.28.1",
 ]
 
 [project.scripts]

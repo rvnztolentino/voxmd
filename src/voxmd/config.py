@@ -7,10 +7,11 @@ Resolution order, first hit wins:
 2. ``./voxmd.yaml``
 3. ``~/.config/voxmd/config.yaml``
 
-Config is **optional** at this stage. ``voxmd transcribe`` runs from CLI flags
-alone, so trying stage 1 on a real memo doesn't require writing a config file
-first. Sections are added by the stages that need them rather than being
-declared up front, so this file grows alongside the pipeline.
+Config is **optional** so far. ``voxmd transcribe`` and ``voxmd extract`` run
+from CLI flags and defaults alone, so trying a stage on a real memo doesn't
+require writing a config file first. Sections are added by the stages that need
+them rather than being declared up front, so this file grows alongside the
+pipeline.
 
 ``safe_load`` rather than ``load`` is not a stylistic choice: full-fat YAML can
 construct arbitrary Python objects, which would turn "edit your config" into
@@ -19,12 +20,22 @@ construct arbitrary Python objects, which would turn "edit your config" into
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import urllib.parse
 from pathlib import Path
+from typing import TypeVar
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .errors import ConfigError
 
@@ -32,8 +43,18 @@ CONFIG_ENV_VAR = "VOXMD_CONFIG"
 LOCAL_CONFIG_NAME = "voxmd.yaml"
 USER_CONFIG_PATH = Path("~/.config/voxmd/config.yaml")
 
+OLLAMA_DEFAULT_PORT = 11434
+
 # "auto", or an ISO 639 code with an optional region: en, yue, pt-br.
 _LANGUAGE_CODE = re.compile(r"auto|[a-z]{2,3}(-[a-z]{2,4})?")
+# Ollama model references: qwen3:8b, library/llama3.2:3b, hf.co/user/repo:Q4_K_M.
+_OLLAMA_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/:]{0,199}")
+
+# Room the context window must leave for the instructions and the transcript,
+# beyond the reply itself.
+_MIN_PROMPT_ROOM_TOKENS = 2048
+
+_Section = TypeVar("_Section", bound=BaseModel)
 
 
 class WhisperConfig(BaseModel):
@@ -75,6 +96,97 @@ class WhisperConfig(BaseModel):
         return cleaned
 
 
+class OllamaConfig(BaseModel):
+    """Ollama extraction settings.
+
+    Two things are deliberately **not** configurable: ``keep_alive`` is always 0
+    (the model is never left resident) and thinking is always off. Both are
+    constraints, not preferences.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = f"http://127.0.0.1:{OLLAMA_DEFAULT_PORT}"
+    """Must be loopback. Transcripts are never sent to another machine."""
+
+    model: str = "qwen3:8b"
+
+    temperature: float = Field(default=0.1, ge=0, le=2)
+    """Low: extraction should be faithful to the memo, not creative."""
+
+    num_ctx: int = Field(default=16384, ge=4096, le=131072)
+    """Context window **ceiling**, in tokens. Each call is sized to its
+    transcript, so short memos use less memory than this."""
+
+    num_predict: int = Field(default=2048, ge=256, le=8192)
+    """Maximum reply length, in tokens."""
+
+    @field_validator("host")
+    @classmethod
+    def _require_loopback(cls, value: str) -> str:
+        return normalize_loopback_host(value)
+
+    @field_validator("model")
+    @classmethod
+    def _check_model(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not _OLLAMA_MODEL.fullmatch(cleaned):
+            raise ValueError(f"not an Ollama model name: {value!r}")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _leave_room_for_the_prompt(self) -> OllamaConfig:
+        if self.num_ctx < self.num_predict + _MIN_PROMPT_ROOM_TOKENS:
+            raise ValueError(
+                f"num_ctx ({self.num_ctx}) must be at least num_predict + "
+                f"{_MIN_PROMPT_ROOM_TOKENS} ({self.num_predict + _MIN_PROMPT_ROOM_TOKENS}), "
+                "or no room is left for the transcript"
+            )
+        return self
+
+
+def normalize_loopback_host(value: str) -> str:
+    """Validate an Ollama host as loopback and return it as ``scheme://host:port``.
+
+    Refused rather than warned about: voxmd's only permitted network traffic is
+    to a local Ollama, and Ollama has no authentication, so a remote host would
+    send every transcript to another machine in the clear.
+    """
+    raw = value.strip()
+    if not raw:
+        raise ValueError("host must not be empty")
+
+    parts = urllib.parse.urlsplit(raw if "://" in raw else f"http://{raw}")
+    if parts.scheme not in {"http", "https"}:
+        raise ValueError(f"host must use http or https, got {parts.scheme!r}")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("host must not contain credentials")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError("host must not include a path, query, or fragment")
+    try:
+        port = parts.port or OLLAMA_DEFAULT_PORT
+    except ValueError as exc:
+        raise ValueError(f"invalid port in host {value!r}") from exc
+
+    hostname = parts.hostname or ""
+    if not _is_loopback(hostname):
+        raise ValueError(
+            f"host must be loopback (127.0.0.1, ::1, or localhost), got {hostname!r}. "
+            "voxmd only sends transcripts to a local Ollama."
+        )
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
+    return f"{parts.scheme}://{netloc}:{port}"
+
+
+def _is_loopback(hostname: str) -> bool:
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 class LimitsConfig(BaseModel):
     """Ceilings and timeouts.
 
@@ -95,6 +207,12 @@ class LimitsConfig(BaseModel):
     """Multiplier on audio duration. large-v3-turbo runs faster than realtime on
     Apple Silicon, so 3x is generous headroom rather than a tight budget."""
 
+    max_transcript_kb: int = Field(default=512, ge=1)
+    """Largest transcript ``voxmd extract`` will read. 512 KB is days of speech."""
+    ollama_timeout_s: float = Field(default=600.0, gt=0)
+    """Whole request, model load included. keep_alive=0 means every memo loads."""
+    ollama_connect_timeout_s: float = Field(default=5.0, gt=0)
+
     @property
     def max_audio_bytes(self) -> int:
         return self.max_audio_mb * 1024 * 1024
@@ -102,6 +220,10 @@ class LimitsConfig(BaseModel):
     @property
     def max_duration_s(self) -> float:
         return self.max_duration_min * 60
+
+    @property
+    def max_transcript_bytes(self) -> int:
+        return self.max_transcript_kb * 1024
 
 
 class Config(BaseModel):
@@ -114,6 +236,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
 
 
@@ -173,17 +296,17 @@ def load_config(explicit: Path | str | None = None) -> Config:
         raise ConfigError(f"Invalid config in {path}:\n{_format_errors(exc)}") from exc
 
 
-def apply_overrides(whisper: WhisperConfig, **overrides: object) -> WhisperConfig:
-    """Layer CLI flags over config, validated exactly as config values are.
+def apply_overrides(section: _Section, **overrides: object) -> _Section:
+    """Layer CLI flags over a config section, validated exactly as config values are.
 
     ``model_copy(update=...)`` would skip validation entirely, letting a flag
     such as ``--language=--help`` through checks the same value fails in a
     file. ``None`` means "flag not given" and leaves the config value alone.
     """
-    merged = whisper.model_dump()
+    merged = section.model_dump()
     merged.update({key: value for key, value in overrides.items() if value is not None})
     try:
-        return WhisperConfig.model_validate(merged)
+        return type(section).model_validate(merged)
     except ValidationError as exc:
         raise ConfigError(f"Invalid option:\n{_format_errors(exc)}") from exc
 

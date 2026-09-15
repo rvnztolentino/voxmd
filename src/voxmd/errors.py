@@ -27,14 +27,20 @@ class DependencyError(VoxmdError):
     """A required external tool or model file is missing or unusable.
 
     Raised for things the setup guide is supposed to have installed: ffmpeg,
-    ffprobe, whisper-cli, the ggml model weights.
+    ffprobe, whisper-cli, the ggml model weights, a running Ollama and its model.
     """
 
     exit_code = 3
 
 
-class AudioError(VoxmdError):
-    """The input is missing, not really audio, unreadable, or over a limit."""
+class InputError(VoxmdError):
+    """The input is missing, the wrong kind of file, unreadable, or over a limit."""
+
+    exit_code = 4
+
+
+class AudioError(InputError):
+    """An audio input is missing, not really audio, unreadable, or over a limit."""
 
     exit_code = 4
 
