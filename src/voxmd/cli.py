@@ -335,6 +335,15 @@ def process(
             show_default=False,
         ),
     ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Ollama model name. Overrides ollama.model in config.",
+            show_default=False,
+        ),
+    ] = None,
     date: Annotated[
         str | None,
         typer.Option(
@@ -379,9 +388,13 @@ def process(
     from .render import format_duration, parse_date
 
     settings = load_config(config)
+    overrides: dict[str, object] = {}
     if vault is not None:
-        vault_cfg = apply_overrides(settings.vault, path=vault.expanduser().absolute())
-        settings = settings.model_copy(update={"vault": vault_cfg})
+        overrides["vault"] = apply_overrides(settings.vault, path=vault.expanduser().absolute())
+    if model is not None:
+        overrides["ollama"] = apply_overrides(settings.ollama, model=model)
+    if overrides:
+        settings = settings.model_copy(update=overrides)
     created = parse_date(date) if date is not None else None
 
     result = run_process(
@@ -465,6 +478,52 @@ def doctor(
     failed = sum(check.status == FAIL for check in checks)
     if failed:
         raise DependencyError(f"{failed} check(s) failed.")
+
+
+@app.command()
+def models(
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """List the Ollama models you have pulled, and which one voxmd will use.
+
+    Read-only: it never pulls or downloads anything.
+    """
+    from .config import load_config
+    from .doctor import installed_models, model_installed
+    from .safe import human_bytes
+
+    settings = load_config(config)
+    configured = settings.ollama.model
+    found = installed_models(settings)
+
+    if not found:
+        typer.echo("No models pulled yet. To get the one voxmd is configured for:")
+        typer.echo(f"  ollama pull {configured}")
+        return
+
+    for entry in found:
+        mark = "*" if model_installed(configured, {entry.name}) else " "
+        about = " ".join(part for part in (entry.parameters, entry.quantization) if part)
+        typer.echo(f"  {mark} {entry.name:<28}{human_bytes(entry.size):>9}  {about}")
+
+    if model_installed(configured, {entry.name for entry in found}):
+        typer.echo("\n  * voxmd uses this one. Change it with ollama.model, or --model.")
+    else:
+        typer.secho(
+            f"voxmd: {configured} is configured but not pulled. Get it with:\n"
+            f"  ollama pull {configured}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
 
 def _note(message: str) -> None:

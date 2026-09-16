@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
-import ollama
 import pytest
 
+from conftest import FakeOllama
 from voxmd import safe
-from voxmd.config import CONFIG_ENV_VAR
-from voxmd.doctor import FAIL, OK, WARN, Check, model_installed, run_checks
+from voxmd.config import CONFIG_ENV_VAR, load_config
+from voxmd.doctor import (
+    FAIL,
+    OK,
+    WARN,
+    Check,
+    installed_models,
+    model_installed,
+    run_checks,
+)
 from voxmd.errors import DependencyError
 
 
@@ -19,28 +26,6 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
-
-@dataclass
-class FakeOllama:
-    installed: list[str] = field(default_factory=lambda: ["qwen3:8b"])
-    loaded: list[str] = field(default_factory=list)
-    error: BaseException | None = None
-
-    def list(self) -> ollama.ListResponse:
-        if self.error is not None:
-            raise self.error
-        return ollama.ListResponse(
-            models=[ollama.ListResponse.Model(model=n) for n in self.installed]
-        )
-
-    def ps(self) -> ollama.ProcessResponse:
-        return ollama.ProcessResponse(
-            models=[ollama.ProcessResponse.Model(model=n) for n in self.loaded]
-        )
-
-    def close(self) -> None:
-        pass
 
 
 @pytest.fixture
@@ -179,3 +164,43 @@ def test_model_names_match_like_ollama_does(
     wanted: str, installed: set[str], expected: bool
 ) -> None:
     assert model_installed(wanted, installed) is expected
+
+
+def test_a_missing_model_lists_the_ones_you_already_have(configured: Path) -> None:
+    checks = by_name(run_checks(configured, client=FakeOllama(installed=["gemma3:4b", "phi4"])))
+
+    detail = checks["ollama model"].detail
+    assert "ollama pull qwen3:8b" in detail
+    assert "gemma3:4b" in detail
+    assert "phi4" in detail
+
+
+def test_no_models_at_all_says_so(configured: Path) -> None:
+    checks = by_name(run_checks(configured, client=FakeOllama(installed=[])))
+
+    assert "(none pulled yet)" in checks["ollama model"].detail
+
+
+class TestInstalledModels:
+    def test_lists_every_pulled_model_sorted_with_its_size(self, configured: Path) -> None:
+        settings = load_config(configured)
+
+        found = installed_models(settings, client=FakeOllama(installed=["qwen3:8b", "gemma3:4b"]))
+
+        assert [model.name for model in found] == ["gemma3:4b", "qwen3:8b"]
+        assert found[0].size == 5_225_388_164
+        assert found[0].parameters == "8.2B"
+        assert found[0].quantization == "Q4_K_M"
+
+    def test_an_unreachable_ollama_says_how_to_start_it(self, configured: Path) -> None:
+        settings = load_config(configured)
+
+        with pytest.raises(DependencyError, match="ollama serve"):
+            installed_models(settings, client=FakeOllama(error=ConnectionError("refused")))
+
+    def test_an_injected_client_is_left_open_for_its_owner(self, configured: Path) -> None:
+        client = FakeOllama()
+
+        installed_models(load_config(configured), client=client)
+
+        assert client.closed is False

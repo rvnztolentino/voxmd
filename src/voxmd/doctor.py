@@ -18,7 +18,7 @@ import ollama
 from . import extract, safe
 from .config import Config, find_config, load_config
 from .entities import load_entities
-from .errors import ConfigError, VoxmdError
+from .errors import ConfigError, DependencyError, VoxmdError
 from .ledger import LEDGER_NAME, Ledger
 from .pipeline import resolve_archive_dir, resolve_notes_dir
 from .render import load_template
@@ -67,6 +67,53 @@ def model_installed(wanted: str, installed: set[str]) -> bool:
     return ":" not in wanted.rsplit("/", 1)[-1] and f"{wanted}:latest" in installed
 
 
+@dataclass(frozen=True)
+class InstalledModel:
+    """One model Ollama has pulled."""
+
+    name: str
+    size: int
+    parameters: str
+    """Parameter count as Ollama reports it, e.g. "8.2B"."""
+    quantization: str
+
+
+def installed_models(settings: Config, *, client: object = None) -> list[InstalledModel]:
+    """Every model Ollama has pulled, by name.
+
+    Read-only, like the rest of this module: listing never pulls anything.
+    """
+    owns_client = client is None
+    if client is None:
+        client = extract.make_client(
+            settings.ollama.host,
+            timeout_s=OLLAMA_CHECK_TIMEOUT_S,
+            connect_timeout_s=settings.limits.ollama_connect_timeout_s,
+        )
+    try:
+        response = client.list()  # type: ignore[attr-defined]
+    except (ConnectionError, httpx.HTTPError, ollama.ResponseError) as exc:
+        raise DependencyError(
+            f"Could not reach Ollama at {settings.ollama.host} ({type(exc).__name__}).\n"
+            f"{extract.OLLAMA_HINT}"
+        ) from exc
+    finally:
+        if owns_client:
+            client.close()  # type: ignore[attr-defined]
+
+    found = [
+        InstalledModel(
+            name=model.model,
+            size=int(model.size or 0),
+            parameters=(model.details.parameter_size if model.details else "") or "",
+            quantization=(model.details.quantization_level if model.details else "") or "",
+        )
+        for model in response.models
+        if model.model
+    ]
+    return sorted(found, key=lambda model: model.name)
+
+
 def _guard(name: str, check: Callable[[], tuple[str, str]]) -> Check:
     try:
         status, detail = check()
@@ -113,11 +160,13 @@ def _ollama(settings: Config, client: object) -> list[Check]:
     if model_installed(cfg.model, names):
         checks.append(Check("ollama model", OK, cfg.model))
     else:
+        available = "\n".join(f"  {name}" for name in sorted(names)) or "  (none pulled yet)"
         checks.append(
             Check(
                 "ollama model",
                 FAIL,
-                f"{cfg.model} is not pulled. Pull it with:\n  ollama pull {cfg.model}",
+                f"{cfg.model} is not pulled. Pull it with:\n  ollama pull {cfg.model}\n"
+                f"Models you already have:\n{available}",
             )
         )
     if loaded.models:

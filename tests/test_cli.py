@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import VALID_EXTRACTION, FakeClient, FakeRunner, chat_reply, probe_json
+from conftest import (
+    VALID_EXTRACTION,
+    FakeClient,
+    FakeOllama,
+    FakeRunner,
+    chat_reply,
+    probe_json,
+)
 from voxmd import cli
 from voxmd import extract as extract_module
 from voxmd.config import CONFIG_ENV_VAR
@@ -394,3 +401,75 @@ def test_doctor_lists_every_check_and_fails_when_something_is_missing(
     assert "whisper model" in result.stdout
     assert "FAIL" in result.stdout
     assert "ollama pull" not in result.stdout
+
+
+def test_process_model_flag_overrides_config(
+    recording: Path, ollama_client: FakeClient, tmp_path: Path
+) -> None:
+    (tmp_path / "voxmd.yaml").write_text(
+        (tmp_path / "voxmd.yaml").read_text() + "ollama:\n  model: qwen3:8b\n"
+    )
+
+    result = runner.invoke(cli.app, ["process", str(recording), "-m", "gemma3:4b"])
+
+    assert result.exit_code == 0, result.output
+    assert ollama_client.chats[0]["model"] == "gemma3:4b"
+
+
+# --- models -----------------------------------------------------------------
+
+
+@pytest.fixture
+def catalog(monkeypatch: pytest.MonkeyPatch) -> FakeOllama:
+    client = FakeOllama(installed=["qwen3:8b", "gemma3:4b"])
+    monkeypatch.setattr(extract_module, "make_client", lambda *args, **kwargs: client)
+    return client
+
+
+def test_models_lists_what_is_pulled_and_marks_the_configured_one(catalog: FakeOllama) -> None:
+    result = runner.invoke(cli.app, ["models"])
+
+    assert result.exit_code == 0, result.output
+    assert "* qwen3:8b" in result.stdout
+    assert "  gemma3:4b" in result.stdout
+    assert "4.9 GB" in result.stdout
+    assert "8.2B Q4_K_M" in result.stdout
+    assert "voxmd uses this one" in result.stdout
+
+
+def test_models_warns_when_the_configured_model_is_not_pulled(
+    catalog: FakeOllama, tmp_path: Path
+) -> None:
+    (tmp_path / "voxmd.yaml").write_text("ollama:\n  model: not-pulled:1b\n")
+
+    result = runner.invoke(cli.app, ["models"])
+
+    assert result.exit_code == 0, result.output
+    assert "gemma3:4b" in result.stdout
+    assert "ollama pull not-pulled:1b" in result.stderr
+
+
+def test_models_with_nothing_pulled_says_what_to_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        extract_module, "make_client", lambda *args, **kwargs: FakeOllama(installed=[])
+    )
+
+    result = runner.invoke(cli.app, ["models"])
+
+    assert result.exit_code == 0, result.output
+    assert "No models pulled yet" in result.stdout
+    assert "ollama pull qwen3:8b" in result.stdout
+
+
+def test_models_reports_an_unreachable_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voxmd.errors import DependencyError
+
+    monkeypatch.setattr(
+        extract_module,
+        "make_client",
+        lambda *args, **kwargs: FakeOllama(error=ConnectionError("refused")),
+    )
+
+    result = runner.invoke(cli.app, ["models"])
+
+    assert isinstance(result.exception, DependencyError)

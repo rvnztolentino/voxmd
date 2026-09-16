@@ -186,3 +186,35 @@ class FakeClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+@dataclass
+class FakeOllama:
+    """Stand-in for ollama.Client's read-only calls: list() and ps()."""
+
+    installed: list[str] = field(default_factory=lambda: ["qwen3:8b"])
+    loaded: list[str] = field(default_factory=list)
+    error: BaseException | None = None
+    closed: bool = False
+
+    def list(self) -> ollama.ListResponse:
+        if self.error is not None:
+            raise self.error
+        return ollama.ListResponse(
+            models=[
+                ollama.ListResponse.Model(
+                    model=name,
+                    size=5_225_388_164,
+                    details={"parameter_size": "8.2B", "quantization_level": "Q4_K_M"},
+                )
+                for name in self.installed
+            ]
+        )
+
+    def ps(self) -> ollama.ProcessResponse:
+        return ollama.ProcessResponse(
+            models=[ollama.ProcessResponse.Model(model=name) for name in self.loaded]
+        )
+
+    def close(self) -> None:
+        self.closed = True
