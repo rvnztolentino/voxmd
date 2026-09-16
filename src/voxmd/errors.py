@@ -55,3 +55,15 @@ class ToolTimeout(ToolFailure):
     """An external tool exceeded its timeout and was killed."""
 
     exit_code = 6
+
+
+class OutputError(VoxmdError):
+    """A note, ledger, or state file could not be written. The recording is untouched."""
+
+    exit_code = 7
+
+
+class PartialFailure(VoxmdError):
+    """The note was written, but a later step (ledger, entities, archive) failed."""
+
+    exit_code = 8

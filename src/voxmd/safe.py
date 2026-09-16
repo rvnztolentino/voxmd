@@ -17,6 +17,7 @@ Two rules are enforced here and nowhere else:
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import os
 import shutil
@@ -229,8 +230,117 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
+    _fsync_dir(path.parent)
+
+
+MAX_NAME_ATTEMPTS = 100
+COPY_CHUNK_BYTES = 1024 * 1024
+# Filesystems without hard links (exFAT, some network shares) report these.
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK})
+
+
+def numbered_names(name: str, *, limit: int = MAX_NAME_ATTEMPTS) -> Iterator[str]:
+    """``name``, then ``stem 2.suffix``, ``stem 3.suffix``, up to ``limit`` names."""
+    path = Path(name)
+    yield name
+    for number in range(2, limit + 1):
+        yield f"{path.stem} {number}{path.suffix}"
+
+
+def write_new_file(directory: Path, name: str, text: str, *, mode: int = 0o600) -> Path:
+    """Write ``text`` to a new file named ``name`` or a numbered variant. Never replaces one.
+
+    The content is written and synced under a hidden temp name first, so
+    anything watching the directory (Obsidian) never sees a half-written file.
+    Returns the path it landed at.
+    """
+    fd, temp_name = tempfile.mkstemp(prefix=".voxmd-", suffix=".tmp", dir=directory)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.chmod(mode)
+        target = _place(temp, directory, name)
+    finally:
+        temp.unlink(missing_ok=True)
+    _fsync_dir(directory)
+    return target
+
+
+def move_no_replace(source: Path, directory: Path) -> Path:
+    """Move ``source`` into ``directory`` under its own name or a numbered variant.
+
+    Never replaces an existing file, and the source is removed only once the
+    file is in place. Across filesystems it is copied, synced, and size-checked
+    first. Returns the new path.
+    """
+    try:
+        if source.stat().st_dev == directory.stat().st_dev:
+            target = _place(source, directory, source.name)
+            source.unlink(missing_ok=True)
+            _fsync_dir(directory)
+            _fsync_dir(source.parent)
+            return target
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+
+    fd, temp_name = tempfile.mkstemp(prefix=".voxmd-", suffix=".tmp", dir=directory)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as copy, source.open("rb") as original:
+            shutil.copyfileobj(original, copy, COPY_CHUNK_BYTES)
+            copy.flush()
+            os.fsync(copy.fileno())
+        shutil.copystat(source, temp)
+        if temp.stat().st_size != source.stat().st_size:
+            raise OSError(errno.EIO, "the copy is incomplete", str(temp))
+        target = _place(temp, directory, source.name)
+    finally:
+        temp.unlink(missing_ok=True)
+    _fsync_dir(directory)
+    source.unlink()
+    return target
+
+
+def _place(file: Path, directory: Path, name: str) -> Path:
+    """Give ``file`` a name in ``directory`` that no other file has. Never replaces one.
+
+    A hard link fails when the name is taken, so claiming a name is atomic; the
+    caller then removes ``file``. Where hard links aren't supported, the name is
+    reserved by an exclusive create and ``file`` is renamed over that
+    reservation, so the only thing ever replaced is voxmd's own empty placeholder.
+    """
+    for candidate in numbered_names(name):
+        target = directory / candidate
+        try:
+            os.link(file, target)
+            return target
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            if exc.errno not in _NO_HARD_LINKS:
+                raise
+        try:
+            reserved = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            continue
+        os.close(reserved)
+        file.replace(target)
+        return target
+    raise FileExistsError(
+        errno.EEXIST,
+        f"{MAX_NAME_ATTEMPTS} files with this name already exist",
+        str(directory / name),
+    )
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Flush a directory entry change to disk. Best effort: not every filesystem allows it."""
     with contextlib.suppress(OSError):
-        dir_fd = os.open(path.parent, os.O_RDONLY)
+        dir_fd = os.open(directory, os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:

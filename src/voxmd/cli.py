@@ -321,6 +321,152 @@ def render(
     print(result.markdown, end="")
 
 
+@app.command()
+def process(
+    audio: Annotated[
+        Path,
+        typer.Argument(help="Recording to turn into a note.", show_default=False),
+    ],
+    vault: Annotated[
+        Path | None,
+        typer.Option(
+            "--vault",
+            help="Obsidian vault folder. Overrides vault.path in config.",
+            show_default=False,
+        ),
+    ] = None,
+    date: Annotated[
+        str | None,
+        typer.Option(
+            "--date",
+            help="When the memo was recorded, ISO 8601. Defaults to the recording's timestamp.",
+            show_default=False,
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Process it again even if the ledger says it's done."),
+    ] = False,
+    no_archive: Annotated[
+        bool,
+        typer.Option(
+            "--no-archive", help="Leave the recording where it is, even if archive.dir is set."
+        ),
+    ] = False,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Print each stage and its timing to stderr."),
+    ] = False,
+) -> None:
+    """Transcribe, extract, and render a recording into a new note in your vault.
+
+    Prints the note's path. The recording moves to archive.dir only after the
+    note is written and verified. A recording already processed is skipped.
+    """
+    from .config import apply_overrides, load_config
+    from .errors import PartialFailure
+    from .pipeline import process as run_process
+    from .render import format_duration, parse_date
+
+    settings = load_config(config)
+    if vault is not None:
+        vault_cfg = apply_overrides(settings.vault, path=vault.expanduser().absolute())
+        settings = settings.model_copy(update={"vault": vault_cfg})
+    created = parse_date(date) if date is not None else None
+
+    result = run_process(
+        audio,
+        settings=settings,
+        created=created,
+        force=force,
+        archive=not no_archive,
+        on_stage=(lambda name: _note(f"{name}...")) if verbose else None,
+    )
+
+    if result.skipped:
+        when = f" on {result.processed_at:%Y-%m-%d %H:%M}" if result.processed_at else ""
+        typer.secho(
+            f"voxmd: already processed{when}; pass --force to process it again.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        print(result.note)
+        return
+
+    transcription, extraction = result.transcription, result.extraction
+    if extraction is not None and extraction.truncated:
+        typer.secho(
+            "voxmd: warning: the transcript may have been truncated to fit ollama.num_ctx; "
+            "the end of the memo may be missing from the note.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    if verbose and transcription is not None and extraction is not None:
+        # Timings and counts only: the title and names are personal.
+        _note(f"duration: {format_duration(transcription.probe.duration_s) or 'unknown'}")
+        _note(f"whisper:  {transcription.whisper_seconds:.1f}s")
+        _note(
+            f"ollama:   {extraction.seconds:.1f}s "
+            f"(load {extraction.load_seconds:.1f}s, attempts {extraction.attempts})"
+        )
+        _note(f"entities: {result.entities_added} added")
+        _note(f"archive:  {result.archived or 'not moved'}")
+        _note(f"total:    {result.seconds:.1f}s")
+    for problem in result.problems:
+        typer.secho(f"voxmd: warning: {problem}", fg=typer.colors.YELLOW, err=True)
+
+    # Only the note's path goes to stdout.
+    print(result.note)
+    if result.problems:
+        raise PartialFailure(
+            f"The note was written, but {len(result.problems)} later step(s) failed; see above."
+        )
+
+
+@app.command()
+def doctor(
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Check that everything voxmd needs is installed and configured.
+
+    Read-only: it never installs, downloads, pulls, or creates anything.
+    """
+    from .doctor import FAIL, OK, run_checks
+    from .errors import DependencyError
+
+    checks = run_checks(config)
+    colors = {OK: typer.colors.GREEN, FAIL: typer.colors.RED}
+    for check in checks:
+        first, *rest = check.detail.splitlines() or [""]
+        status = typer.style(f"{check.status:<4}", fg=colors.get(check.status, typer.colors.YELLOW))
+        typer.echo(f"  {status}  {check.name:<15}{first}")
+        for line in rest:
+            typer.echo(f"{'':23}{line}")
+
+    failed = sum(check.status == FAIL for check in checks)
+    if failed:
+        raise DependencyError(f"{failed} check(s) failed.")
+
+
 def _note(message: str) -> None:
     typer.secho(message, fg=typer.colors.BRIGHT_BLACK, err=True)
 

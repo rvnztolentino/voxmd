@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -74,6 +75,152 @@ class TestFileLock:
         with pytest.raises(OSError), safe.file_lock(link, timeout_s=0.1, what="x"):
             pass
         assert not target.exists()
+
+
+def names(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir())
+
+
+def no_hard_links(src: object, dst: object) -> None:
+    raise OSError(errno.ENOTSUP, "Operation not supported")
+
+
+class TestWriteNewFile:
+    def test_writes_a_private_file(self, tmp_path: Path) -> None:
+        path = safe.write_new_file(tmp_path, "note.md", "hi\n")
+
+        assert path == tmp_path / "note.md"
+        assert path.read_text() == "hi\n"
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_a_taken_name_gets_a_number_and_existing_files_are_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "note.md").write_text("mine")
+        (tmp_path / "note 2.md").write_text("also mine")
+
+        path = safe.write_new_file(tmp_path, "note.md", "new")
+
+        assert path.name == "note 3.md"
+        assert path.read_text() == "new"
+        assert (tmp_path / "note.md").read_text() == "mine"
+        assert (tmp_path / "note 2.md").read_text() == "also mine"
+        assert names(tmp_path) == ["note 2.md", "note 3.md", "note.md"]
+
+    def test_without_hard_links_it_still_never_replaces_a_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(os, "link", no_hard_links)
+        (tmp_path / "note.md").write_text("mine")
+
+        path = safe.write_new_file(tmp_path, "note.md", "new")
+
+        assert path.name == "note 2.md"
+        assert path.read_text() == "new"
+        assert (tmp_path / "note.md").read_text() == "mine"
+        assert names(tmp_path) == ["note 2.md", "note.md"]
+
+    def test_a_failed_write_leaves_nothing_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail(fd: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fsync", fail)
+
+        with pytest.raises(OSError, match="disk full"):
+            safe.write_new_file(tmp_path, "note.md", "new")
+        assert names(tmp_path) == []
+
+    def test_it_gives_up_when_every_numbered_name_is_taken(self, tmp_path: Path) -> None:
+        for name in safe.numbered_names("note.md"):
+            (tmp_path / name).touch()
+
+        with pytest.raises(FileExistsError):
+            safe.write_new_file(tmp_path, "note.md", "new")
+        assert not [name for name in names(tmp_path) if name.startswith(".")]
+
+
+class TestMoveNoReplace:
+    @pytest.fixture
+    def source(self, tmp_path: Path) -> Path:
+        path = tmp_path / "inbox" / "memo.m4a"
+        path.parent.mkdir()
+        path.write_bytes(b"audio bytes")
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+        return path
+
+    @pytest.fixture
+    def archive(self, tmp_path: Path) -> Path:
+        path = tmp_path / "archive"
+        path.mkdir()
+        return path
+
+    def test_moves_the_file(self, source: Path, archive: Path) -> None:
+        moved = safe.move_no_replace(source, archive)
+
+        assert moved == archive / "memo.m4a"
+        assert moved.read_bytes() == b"audio bytes"
+        assert not source.exists()
+
+    def test_a_taken_name_gets_a_number(self, source: Path, archive: Path) -> None:
+        (archive / "memo.m4a").write_bytes(b"older")
+
+        moved = safe.move_no_replace(source, archive)
+
+        assert moved.name == "memo 2.m4a"
+        assert (archive / "memo.m4a").read_bytes() == b"older"
+        assert not source.exists()
+
+    def test_without_hard_links_it_renames_without_replacing(
+        self, source: Path, archive: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(os, "link", no_hard_links)
+        (archive / "memo.m4a").write_bytes(b"older")
+
+        moved = safe.move_no_replace(source, archive)
+
+        assert moved.name == "memo 2.m4a"
+        assert moved.read_bytes() == b"audio bytes"
+        assert (archive / "memo.m4a").read_bytes() == b"older"
+        assert not source.exists()
+
+    def test_across_filesystems_it_copies_then_removes_the_source(
+        self, source: Path, archive: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_link = os.link
+
+        def cross_device(src: object, dst: object) -> None:
+            if Path(str(src)) == source:
+                raise OSError(errno.EXDEV, "Cross-device link")
+            real_link(src, dst)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "link", cross_device)
+
+        moved = safe.move_no_replace(source, archive)
+
+        assert moved == archive / "memo.m4a"
+        assert moved.read_bytes() == b"audio bytes"
+        assert moved.stat().st_mtime == 1_700_000_000
+        assert not source.exists()
+        assert names(archive) == ["memo.m4a"]
+
+    def test_a_failed_copy_keeps_the_source(
+        self, source: Path, archive: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def cross_device(src: object, dst: object) -> None:
+            raise OSError(errno.EXDEV, "Cross-device link")
+
+        def fail(fd: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "link", cross_device)
+        monkeypatch.setattr(os, "fsync", fail)
+
+        with pytest.raises(OSError, match="disk full"):
+            safe.move_no_replace(source, archive)
+        assert source.read_bytes() == b"audio bytes"
+        assert names(archive) == []
 
 
 class TestRun:

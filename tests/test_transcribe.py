@@ -115,6 +115,48 @@ class TestSkipsWork:
         assert probe.is_whisper_ready is False
 
 
+class TestCreationTime:
+    """The recording time that dates a note, read from the container's metadata."""
+
+    def probe(self, fake_run: FakeRunner, tmp_path: Path, tags: object) -> AudioProbe:
+        import json
+
+        from voxmd.transcribe import probe_audio
+
+        payload = json.loads(probe_json())
+        payload["format"]["tags"] = tags
+        fake_run.set("ffprobe", stdout=json.dumps(payload))
+        return probe_audio(tmp_path / "memo.m4a", ffprobe=Path("/usr/bin/ffprobe"), timeout=5)
+
+    def test_utc_creation_time_becomes_local_time_to_the_minute(
+        self, fake_run: FakeRunner, tmp_path: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        probe = self.probe(fake_run, tmp_path, {"creation_time": "2026-03-01T12:00:42.123456Z"})
+
+        expected = datetime(2026, 3, 1, 12, tzinfo=UTC).astimezone().replace(tzinfo=None)
+        assert probe.created == expected
+
+    @pytest.mark.parametrize(
+        "tags",
+        [
+            None,
+            {},
+            "not a mapping",
+            {"creation_time": 12345},
+            {"creation_time": "yesterday"},
+            {"creation_time": "1970-01-01T00:00:00.000000Z"},
+            {"creation_time": "1904-01-01T00:00:00.000000Z"},
+            {"creation_time": "2999-01-01T00:00:00.000000Z"},
+        ],
+    )
+    def test_missing_or_implausible_creation_times_are_ignored(
+        self, fake_run: FakeRunner, tmp_path: Path, tags: object
+    ) -> None:
+        assert self.probe(fake_run, tmp_path, tags).created is None
+
+
 class TestFailsBeforeExpensiveWork:
     """Anything that can be rejected cheaply must be, before whisper starts."""
 

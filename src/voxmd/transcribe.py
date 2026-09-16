@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import safe
@@ -83,6 +84,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _NON_SPEECH = re.compile(r"^\[[A-Z_ ]+\]$")
 _WHITESPACE = re.compile(r"\s+")
 
+# Containers whose creation_time was never set carry 1904 or 1970 epochs.
+EARLIEST_RECORDING = datetime(2000, 1, 1, tzinfo=UTC)
+
 
 @dataclass(frozen=True)
 class AudioProbe:
@@ -92,6 +96,9 @@ class AudioProbe:
     sample_rate: int | None
     channels: int | None
     codec: str | None
+    created: datetime | None = None
+    """When the recording was made, per the container's ``creation_time`` tag,
+    as local time to the minute. None when absent or implausible."""
 
     @property
     def is_whisper_ready(self) -> bool:
@@ -187,14 +194,16 @@ def probe_audio(source: Path, *, ffprobe: Path, timeout: float) -> AudioProbe:
     # Duration lives on the stream for most containers and only on the format
     # for some; either can be absent for a stream-copied or truncated file.
     duration = _as_float(stream.get("duration"))
+    container = payload.get("format") or {}
     if duration is None:
-        duration = _as_float((payload.get("format") or {}).get("duration"))
+        duration = _as_float(container.get("duration"))
 
     return AudioProbe(
         duration_s=duration,
         sample_rate=_as_int(stream.get("sample_rate")),
         channels=_as_int(stream.get("channels")),
         codec=stream.get("codec_name"),
+        created=_creation_time(container) or _creation_time(stream),
     )
 
 
@@ -226,7 +235,7 @@ def transcribe(
             "Raise limits.max_duration_min in your config if this is expected."
         )
 
-    model = _resolve_model(whisper)
+    model = resolve_model(whisper)
     whisper_bin = safe.resolve_tool(whisper.binary, hint=WHISPER_HINT)
     threads = whisper.threads or default_threads()
 
@@ -286,7 +295,7 @@ def clean_transcript(raw: str) -> str:
     return _WHITESPACE.sub(" ", " ".join(lines)).strip()
 
 
-def _resolve_model(whisper: WhisperConfig) -> Path:
+def resolve_model(whisper: WhisperConfig) -> Path:
     """Check the ggml weights exist before spending time on conversion."""
     if whisper.model is None:
         raise DependencyError(
@@ -403,6 +412,28 @@ def _as_int(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _creation_time(section: object) -> datetime | None:
+    """A ``creation_time`` tag as local time, or None if absent or implausible.
+
+    ffmpeg writes it in UTC; a value without an offset is read as UTC too.
+    Anything before 2000 or more than a day in the future is ignored, rather
+    than dating a memo decades back.
+    """
+    tags = section.get("tags") if isinstance(section, dict) else None
+    value = tags.get("creation_time") if isinstance(tags, dict) else None
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if not EARLIEST_RECORDING <= parsed <= datetime.now(UTC) + timedelta(days=1):
+        return None
+    return parsed.astimezone().replace(tzinfo=None, second=0, microsecond=0)
 
 
 def _as_float(value: object) -> float | None:

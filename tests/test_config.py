@@ -190,3 +190,55 @@ def test_overrides_are_validated_for_any_section() -> None:
 
 def test_transcript_limit_is_in_kilobytes() -> None:
     assert LimitsConfig(max_transcript_kb=2).max_transcript_bytes == 2048
+
+
+def test_ledger_limit_is_in_megabytes() -> None:
+    assert LimitsConfig(max_ledger_mb=2).max_ledger_bytes == 2 * 1024 * 1024
+
+
+def test_process_settings_default_to_no_vault_no_archive_and_a_private_state_dir(
+    tmp_path: Path,
+) -> None:
+    config = Config()
+
+    assert config.vault.path is None
+    assert config.vault.folder is None
+    assert config.archive.dir is None
+    assert config.state.dir == tmp_path / "home" / ".local" / "state" / "voxmd"
+
+
+def test_vault_archive_and_state_paths_expand_home(tmp_path: Path) -> None:
+    config = load_config(
+        write(
+            tmp_path / "c.yaml",
+            "vault:\n  path: ~/Vault\n  folder: Voice memos/2026\n"
+            "archive:\n  dir: ~/archive\nstate:\n  dir: ~/state\n",
+        )
+    )
+
+    home = tmp_path / "home"
+    assert config.vault.path == home / "Vault"
+    assert config.vault.folder == Path("Voice memos/2026")
+    assert config.archive.dir == home / "archive"
+    assert config.state.dir == home / "state"
+
+
+@pytest.mark.parametrize(
+    "setting",
+    ["vault:\n  path: relative/vault\n", "archive:\n  dir: archive\n", "state:\n  dir: ./state\n"],
+)
+def test_write_destinations_must_be_absolute(tmp_path: Path, setting: str) -> None:
+    with pytest.raises(ConfigError, match="absolute"):
+        load_config(write(tmp_path / "c.yaml", setting))
+
+
+@pytest.mark.parametrize("folder", ["../outside", "/etc", "~/elsewhere", "a/../../b"])
+def test_vault_folder_must_stay_inside_the_vault(tmp_path: Path, folder: str) -> None:
+    with pytest.raises(ConfigError, match="inside the vault"):
+        load_config(write(tmp_path / "c.yaml", f"vault:\n  folder: '{folder}'\n"))
+
+
+@pytest.mark.parametrize("folder", ["''", "."])
+def test_an_empty_vault_folder_means_the_vault_root(tmp_path: Path, folder: str) -> None:
+    config = load_config(write(tmp_path / "c.yaml", f"vault:\n  folder: {folder}\n"))
+    assert config.vault.folder is None

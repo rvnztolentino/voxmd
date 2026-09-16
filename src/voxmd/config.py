@@ -7,11 +7,12 @@ Resolution order, first hit wins:
 2. ``./voxmd.yaml``
 3. ``~/.config/voxmd/config.yaml``
 
-Config is **optional** so far. ``voxmd transcribe``, ``voxmd extract`` and
-``voxmd render`` run from CLI flags and defaults alone, so trying a stage on a real memo doesn't
-require writing a config file first. Sections are added by the stages that need
-them rather than being declared up front, so this file grows alongside the
-pipeline.
+Config is **optional** for the single-stage commands: ``voxmd transcribe``,
+``voxmd extract`` and ``voxmd render`` run from CLI flags and defaults alone, so
+trying a stage on a real memo doesn't require writing a config file first.
+``voxmd process`` needs a vault, from ``vault.path`` or ``--vault``. Sections
+are added by the stages that need them rather than being declared up front, so
+this file grows alongside the pipeline.
 
 ``safe_load`` rather than ``load`` is not a stylistic choice: full-fat YAML can
 construct arbitrary Python objects, which would turn "edit your config" into
@@ -220,6 +221,70 @@ class EntitiesConfig(BaseModel):
         return value.expanduser()
 
 
+def _absolute(value: Path, setting: str) -> Path:
+    """A write destination must not depend on the directory voxmd runs from."""
+    expanded = value.expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"{setting} must be an absolute path or start with ~, got {str(value)!r}")
+    return expanded
+
+
+class VaultConfig(BaseModel):
+    """Where ``voxmd process`` writes notes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: Path | None = None
+    """The Obsidian vault. It must already exist: voxmd never creates it, so a
+    typo fails instead of quietly starting a new folder somewhere."""
+
+    folder: Path | None = None
+    """Folder inside the vault for new notes, created if missing. ``None`` is
+    the vault root."""
+
+    @field_validator("path")
+    @classmethod
+    def _check_path(cls, value: Path | None) -> Path | None:
+        return _absolute(value, "vault.path") if value is not None else None
+
+    @field_validator("folder")
+    @classmethod
+    def _check_folder(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        if value.is_absolute() or str(value).startswith("~") or ".." in value.parts:
+            raise ValueError("vault.folder must be a relative path inside the vault, without '..'")
+        return value if value.parts else None
+
+
+class ArchiveConfig(BaseModel):
+    """Where processed recordings go."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dir: Path | None = None
+    """Recordings move here once their note is written. ``None`` leaves them
+    where they are. Created if missing, but its parent must exist."""
+
+    @field_validator("dir")
+    @classmethod
+    def _check_dir(cls, value: Path | None) -> Path | None:
+        return _absolute(value, "archive.dir") if value is not None else None
+
+
+class StateConfig(BaseModel):
+    """voxmd's own bookkeeping: the ledger of processed recordings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dir: Path = Field(default=Path("~/.local/state/voxmd"), validate_default=True)
+
+    @field_validator("dir")
+    @classmethod
+    def _check_dir(cls, value: Path) -> Path:
+        return _absolute(value, "state.dir")
+
+
 class LimitsConfig(BaseModel):
     """Ceilings and timeouts.
 
@@ -251,6 +316,12 @@ class LimitsConfig(BaseModel):
     max_template_kb: int = Field(default=64, ge=1)
     max_entities_kb: int = Field(default=2048, ge=1)
     """Largest entities.json. 2 MB holds tens of thousands of names."""
+    max_ledger_mb: int = Field(default=16, ge=1)
+    """Largest ledger. An entry is a few hundred bytes, so 16 MB is decades of memos."""
+
+    @property
+    def max_ledger_bytes(self) -> int:
+        return self.max_ledger_mb * 1024 * 1024
 
     @property
     def max_extraction_bytes(self) -> int:
@@ -290,6 +361,9 @@ class Config(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     entities: EntitiesConfig = Field(default_factory=EntitiesConfig)
+    vault: VaultConfig = Field(default_factory=VaultConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
 
 

@@ -106,7 +106,7 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
     probe = (
         "import sys, voxmd.cli; "
         "heavy = {'voxmd.config', 'voxmd.transcribe', 'voxmd.extract', 'voxmd.schema', "
-        "'voxmd.render', 'voxmd.entities', "
+        "'voxmd.render', 'voxmd.entities', 'voxmd.pipeline', 'voxmd.ledger', 'voxmd.doctor', "
         "'pydantic', 'yaml', 'ollama', 'httpx', 'jinja2', 'rapidfuzz'}; "
         "loaded = sorted(heavy & set(sys.modules)); "
         "print(','.join(loaded))"
@@ -273,3 +273,124 @@ def test_render_rejects_a_bad_date_before_reading_input() -> None:
 
     assert isinstance(result.exception, InputError)
     assert "ISO 8601" in str(result.exception)
+
+
+# --- process ----------------------------------------------------------------
+
+
+@pytest.fixture
+def recording(
+    tmp_path: Path,
+    fake_run: FakeRunner,
+    fake_tools: None,
+    model_file: Path,
+    ollama_client: FakeClient,
+) -> Path:
+    (tmp_path / "vault").mkdir()
+    (tmp_path / "voxmd.yaml").write_text(
+        f"whisper:\n  model: {model_file}\nvault:\n  path: {tmp_path / 'vault'}\n"
+    )
+    fake_run.set("ffprobe", stdout=probe_json())
+    fake_run.set("whisper-cli", stdout="Marco and Ana agreed to ship on Friday.")
+    audio = tmp_path / "inbox.m4a"
+    audio.write_bytes(b"\x02" * 4096)
+    return audio
+
+
+def test_process_prints_only_the_note_path(recording: Path, tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, ["process", str(recording), "--date", "2026-09-15T14:03"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'vault' / '2026-09-15 Ship date.md'}\n"
+    assert result.stderr == ""
+
+
+def test_process_skips_a_recording_it_has_already_done(recording: Path) -> None:
+    first = runner.invoke(cli.app, ["process", str(recording)])
+    second = runner.invoke(cli.app, ["process", str(recording)])
+
+    assert second.exit_code == 0, second.output
+    assert second.stdout == first.stdout
+    assert "already processed" in second.stderr
+
+
+def test_process_verbose_shows_stages_but_no_title_or_names(recording: Path) -> None:
+    result = runner.invoke(cli.app, ["process", str(recording), "-v"])
+
+    assert result.exit_code == 0, result.output
+    assert "transcribing..." in result.stderr
+    assert "whisper:" in result.stderr
+    assert "Ship date" not in result.stderr
+    assert "Marco" not in result.stderr
+
+
+def test_process_vault_flag_overrides_config(recording: Path, tmp_path: Path) -> None:
+    (tmp_path / "other").mkdir()
+
+    result = runner.invoke(cli.app, ["process", str(recording), "--vault", "other"])
+
+    assert result.exit_code == 0, result.output
+    assert Path(result.stdout.strip()).parent == tmp_path / "other"
+
+
+def test_process_prints_the_note_before_reporting_a_partial_failure(
+    recording: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    from voxmd import safe
+    from voxmd.errors import PartialFailure
+
+    with (tmp_path / "voxmd.yaml").open("a") as config:
+        config.write(f"archive:\n  dir: {tmp_path / 'archive'}\n")
+
+    def denied(*args: object, **kwargs: object) -> Path:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(safe, "move_no_replace", denied)
+
+    result = runner.invoke(cli.app, ["process", str(recording)])
+
+    assert isinstance(result.exception, PartialFailure)
+    assert result.exception.exit_code == 8
+    assert Path(result.stdout.strip()).is_file()
+    assert "not archived" in result.stderr
+    assert recording.exists()
+
+
+def test_process_without_a_vault_fails_before_transcribing(
+    recording: Path, tmp_path: Path, fake_run: FakeRunner, model_file: Path
+) -> None:
+    from voxmd.errors import ConfigError
+
+    (tmp_path / "voxmd.yaml").write_text(f"whisper:\n  model: {model_file}\n")
+
+    result = runner.invoke(cli.app, ["process", str(recording)])
+
+    assert isinstance(result.exception, ConfigError)
+    assert fake_run.calls == []
+
+
+# --- doctor -----------------------------------------------------------------
+
+
+def test_doctor_lists_every_check_and_fails_when_something_is_missing(
+    fake_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voxmd.errors import DependencyError
+
+    class Unreachable:
+        def list(self) -> None:
+            raise ConnectionError("refused")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(extract_module, "make_client", lambda *args, **kwargs: Unreachable())
+
+    result = runner.invoke(cli.app, ["doctor"])
+
+    assert isinstance(result.exception, DependencyError)
+    assert "whisper model" in result.stdout
+    assert "FAIL" in result.stdout
+    assert "ollama pull" not in result.stdout

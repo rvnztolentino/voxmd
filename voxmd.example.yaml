@@ -3,8 +3,8 @@
 # Copy to ~/.config/voxmd/config.yaml (or ./voxmd.yaml) and edit.
 # Your real config is gitignored: it holds local paths.
 #
-# Settings exist for transcribe, extract and render so far. The vault section is
-# added when `voxmd process` is built.
+# transcribe, extract and render work without a config file. `voxmd process`
+# needs vault.path (or --vault). Run `voxmd doctor` to check everything.
 
 whisper:
   # Homebrew's whisper-cpp installs `whisper-cli`. Use an absolute path for a
@@ -57,6 +57,23 @@ entities:
   # "Christopher"/"Christophor" but keeps "Marco"/"Marcus" apart.
   fuzzy_threshold: 90
 
+vault:
+  # Your Obsidian vault. Must already exist; voxmd never creates it.
+  path: ~/Documents/Obsidian/Main
+
+  # Folder inside the vault for new notes, created if missing. Omit for the
+  # vault root.
+  folder: Voice memos
+
+archive:
+  # Recordings move here after their note is written and verified. Created if
+  # missing (its parent must exist). Omit to leave recordings where they are.
+  # dir: ~/Documents/Voice memos archive
+
+state:
+  # The ledger of processed recordings, so nothing is processed twice.
+  dir: ~/.local/state/voxmd
+
 limits:
   # Rejected before any processing starts.
   max_audio_mb: 500
@@ -65,6 +82,7 @@ limits:
   max_extraction_kb: 256
   max_template_kb: 64
   max_entities_kb: 2048
+  max_ledger_mb: 16
 
   # Timeouts. whisper's scales with audio length:
   #   max(whisper_timeout_floor_s, duration * whisper_timeout_factor)
