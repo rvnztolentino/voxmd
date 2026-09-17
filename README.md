@@ -1,6 +1,6 @@
 # voxmd
 
-[![PyPI](https://img.shields.io/pypi/v/voxmd)](https://pypi.org/project/voxmd/)
+[![PyPI](https://img.shields.io/pypi/v/voxmd?logo=pypi&logoColor=white)](https://pypi.org/project/voxmd/)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/rvnztolentino/voxmd/blob/main/LICENSE)
 [![Platform: macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](https://github.com/rvnztolentino/voxmd#setup)
