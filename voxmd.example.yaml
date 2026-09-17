@@ -11,7 +11,7 @@ whisper:
   # custom build.
   binary: whisper-cli
 
-  # ggml weights. A 1.6 GB manual download; see setup.md.
+  # ggml weights. A 1.6 GB manual download; see the README.
   model: ~/.local/share/voxmd/models/ggml-large-v3-turbo.bin
 
   # ISO code such as `en`, or `auto` to detect per memo.
@@ -44,8 +44,9 @@ ollama:
 
 render:
   # Jinja2 note template. Omit to use the built-in one; to customize, copy
-  # src/voxmd/templates/note.md.j2 somewhere, edit it, and point this at it.
-  template: ~/.config/voxmd/note.md.j2
+  # src/voxmd/templates/note.md.j2 from the voxmd repository somewhere, edit
+  # it, and point this at it.
+  # template: ~/.config/voxmd/note.md.j2
 
 entities:
   # Known people and topics, e.g. {"people": ["Marco"], "topics": ["release"]}.

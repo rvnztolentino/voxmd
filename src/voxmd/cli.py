@@ -18,6 +18,7 @@ from typing import Annotated
 
 import typer
 
+from . import __version__
 from .errors import VoxmdError
 
 app = typer.Typer(
@@ -27,8 +28,24 @@ app = typer.Typer(
 )
 
 
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(f"voxmd {__version__}")
+        raise typer.Exit
+
+
 @app.callback()
-def _root() -> None:
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_print_version,
+            is_eager=True,
+            help="Print the version and exit.",
+        ),
+    ] = False,
+) -> None:
     """Voice memo to structured markdown notes. Fully local."""
     # With a single command, typer would otherwise make `transcribe` the root
     # command and treat the word "transcribe" as its audio argument.

@@ -1,5 +1,5 @@
 # Local config and state — contain vault paths, personal names, and note content.
-# Deliberately never committed; see setup.md.
+# Deliberately never committed.
 voxmd.yaml
 voxmd.yml
 entities.json

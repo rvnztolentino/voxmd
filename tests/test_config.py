@@ -296,7 +296,10 @@ class TestCommentedOutSections:
 
     def test_the_shipped_example_config_is_valid(self) -> None:
         example = Path(__file__).resolve().parents[1] / "voxmd.example.yaml"
-        assert load_config(example).vault.path is not None
+        settings = load_config(example)
+        assert settings.vault.path is not None
+        # A fresh copy must use the built-in template, not a file new users lack.
+        assert settings.render.template is None
 
     def test_a_null_value_for_an_unknown_key_is_still_an_error(self, tmp_path: Path) -> None:
         config = tmp_path / "voxmd.yaml"

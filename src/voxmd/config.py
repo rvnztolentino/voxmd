@@ -26,7 +26,7 @@ import os
 import re
 import urllib.parse
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal
 
 import yaml
 from pydantic import (
@@ -54,8 +54,6 @@ _OLLAMA_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/:]{0,199}")
 # Room the context window must leave for the instructions and the transcript,
 # beyond the reply itself.
 _MIN_PROMPT_ROOM_TOKENS = 2048
-
-_Section = TypeVar("_Section", bound=BaseModel)
 
 
 class WhisperConfig(BaseModel):
@@ -520,7 +518,7 @@ def load_config(explicit: Path | str | None = None) -> Config:
         raise ConfigError(f"Invalid config in {path}:\n{_format_errors(exc)}") from exc
 
 
-def apply_overrides(section: _Section, **overrides: object) -> _Section:
+def apply_overrides[S: BaseModel](section: S, **overrides: object) -> S:
     """Layer CLI flags over a config section, validated exactly as config values are.
 
     ``model_copy(update=...)`` would skip validation entirely, letting a flag

@@ -227,6 +227,11 @@ def test_a_child_process_still_running_stops_the_run_before_ollama(env: Env) -> 
     assert not env.notes.exists()
 
 
+def test_the_child_process_check_is_real_on_this_platform() -> None:
+    """macOS gained os.waitid in Python 3.13, which is why voxmd requires 3.13."""
+    assert hasattr(os, "waitid")
+
+
 def test_the_child_process_check_passes_with_no_children() -> None:
     pipeline.assert_no_child_processes()
 

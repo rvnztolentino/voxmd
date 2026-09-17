@@ -326,8 +326,6 @@ def assert_no_child_processes() -> None:
     ``WNOWAIT`` only looks: it doesn't reap anything, so the check has no side
     effects. No children at all raises ChildProcessError, which is the pass case.
     """
-    if not hasattr(os, "waitid"):  # pragma: no cover - voxmd targets macOS
-        return
     try:
         os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except ChildProcessError:

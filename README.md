@@ -1,9 +1,9 @@
 # voxmd
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Platform: macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#setup)
-[![Runs locally](https://img.shields.io/badge/runs-100%25%20local-brightgreen)](#good-to-know)
+[![PyPI](https://img.shields.io/pypi/v/voxmd)](https://pypi.org/project/voxmd/)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/rvnztolentino/voxmd/blob/main/LICENSE)
+[![Platform: macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](https://github.com/rvnztolentino/voxmd#setup)
 
 Turn voice memos into linked Obsidian notes, entirely on your own machine. voxmd transcribes a recording, pulls out a summary, key points, decisions, actions, people and topics, and writes a note into your vault. Run it on one file, or let it watch the folder your phone syncs into.
 
@@ -11,12 +11,10 @@ Turn voice memos into linked Obsidian notes, entirely on your own machine. voxmd
 
 Works on macOS and Linux (not Windows). The commands use Homebrew; on Linux, install ffmpeg, whisper.cpp and Ollama with your package manager.
 
-1. **Install voxmd and its tools.**
+1. **Install voxmd and its tools.** voxmd installs with [uv](https://docs.astral.sh/uv/), which also fetches Python 3.13 if you don't have it.
 
    ```sh
-   git clone https://github.com/rvnztolentino/voxmd.git
-   cd voxmd
-   uv sync
+   uv tool install voxmd
    brew install ffmpeg whisper-cpp
    ```
 
@@ -38,13 +36,14 @@ Works on macOS and Linux (not Windows). The commands use Homebrew; on Linux, ins
 
    ```sh
    mkdir -p ~/.config/voxmd
-   cp voxmd.example.yaml ~/.config/voxmd/config.yaml
+   curl -L -o ~/.config/voxmd/config.yaml \
+     https://raw.githubusercontent.com/rvnztolentino/voxmd/main/voxmd.example.yaml
    ```
 
 5. **Check everything.** Every line should say `ok`; anything that fails tells you how to fix it. It changes nothing.
 
    ```sh
-   uv run voxmd doctor
+   voxmd doctor
    ```
 
 ## Usage
@@ -52,7 +51,7 @@ Works on macOS and Linux (not Windows). The commands use Homebrew; on Linux, ins
 **One recording:**
 
 ```sh
-uv run voxmd process memo.m4a
+voxmd process memo.m4a
 ```
 
 Prints the path of the new note. Useful flags: `--model` (another Ollama model), `--vault PATH`, `--date`, `--no-archive` (leave the audio where it is), `--force`, and `-v` for timings.
@@ -60,8 +59,8 @@ Prints the path of the new note. Useful flags: `--model` (another Ollama model),
 **A folder, automatically:**
 
 ```sh
-uv run voxmd watch      # runs until you press Ctrl-C or close the terminal
-uv run voxmd status     # in another terminal: running?, last activity, notes made today
+voxmd watch      # runs until you press Ctrl-C or close the terminal
+voxmd status     # in another terminal: running?, last activity, notes made today
 ```
 
 The watcher waits for each file to finish syncing, handles one memo at a time, picks up anything already in the folder when it starts, and logs everything it does to `~/.local/state/voxmd/voxmd.log`.
@@ -69,12 +68,12 @@ The watcher waits for each file to finish syncing, handles one memo at a time, p
 **Other commands:** `voxmd models` lists your Ollama models. `transcribe`, `extract` and `render` run one step at a time and pipe into each other:
 
 ```sh
-uv run voxmd transcribe memo.m4a | uv run voxmd extract | uv run voxmd render --source memo.m4a
+voxmd transcribe memo.m4a | voxmd extract | voxmd render --source memo.m4a
 ```
 
 ## Configuration
 
-One YAML file, read from `$VOXMD_CONFIG`, then `./voxmd.yaml`, then `~/.config/voxmd/config.yaml` (first found wins). `voxmd.example.yaml` documents every setting.
+One YAML file, read from `$VOXMD_CONFIG`, then `./voxmd.yaml`, then `~/.config/voxmd/config.yaml` (first found wins). [`voxmd.example.yaml`](https://github.com/rvnztolentino/voxmd/blob/main/voxmd.example.yaml) documents every setting.
 
 ```yaml
 whisper:
@@ -118,7 +117,7 @@ For transcription, `whisper.model` can be any ggml file from the same Hugging Fa
 - **Links:** people and topics in `entities.json` become `[[links]]`, and new ones are added for next time.
 - **Transcript:** the full transcript is saved in `Transcripts/` and linked from the note.
 - **Repeats:** processing the same audio again creates `Title 2.md` and never changes the first note.
-- **Templates:** the layout comes from `src/voxmd/templates/note.md.j2`. Copy it and set `render.template` to customise.
+- **Templates:** the layout comes from [`note.md.j2`](https://github.com/rvnztolentino/voxmd/blob/main/src/voxmd/templates/note.md.j2). Copy it and set `render.template` to customise.
 
 ## Good to know
 
@@ -127,18 +126,23 @@ For transcription, `whisper.model` can be any ggml file from the same Hugging Fa
 - **Nothing is overwritten or deleted.** A recording is only archived after its note is saved.
 - **It can make mistakes.** Every note says so; check names and actions against the transcript or the recording.
 - **Transcripts are private.** Notes and transcripts are only readable by your user, but they're stored unencrypted. If your vault syncs, they sync too; set `vault.transcripts: false` to skip them.
+- **Updating.** `uv tool upgrade voxmd`. See the [changelog](https://github.com/rvnztolentino/voxmd/blob/main/CHANGELOG.md) for what changed.
 - **No speaker labels.** voxmd can't tell who said what in a meeting.
 - **Exit codes:** `0` done · `2` config · `3` missing tool · `4` bad input · `5` tool failed · `6` timeout · `7` note not written · `8` note written, a later step failed.
 
 ## Tech stack
 
-- Python 3.11+ with [uv](https://docs.astral.sh/uv/)
+- Python 3.13+ with [uv](https://docs.astral.sh/uv/)
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription, [Ollama](https://ollama.com) for extraction, ffmpeg for audio
 - [typer](https://typer.tiangolo.com), [pydantic](https://docs.pydantic.dev), [Jinja2](https://jinja.palletsprojects.com), [RapidFuzz](https://rapidfuzz.github.io/RapidFuzz/), [watchdog](https://github.com/gorakhargosh/watchdog)
 
 ## Development
 
 ```sh
+git clone https://github.com/rvnztolentino/voxmd.git
+cd voxmd
+uv sync
+uv run voxmd --help
 uv run pytest            # no models, tools or network needed
 uv run ruff check
 uv run ruff format --check
@@ -146,4 +150,4 @@ uv run ruff format --check
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/rvnztolentino/voxmd/blob/main/LICENSE) · [Changelog](https://github.com/rvnztolentino/voxmd/blob/main/CHANGELOG.md)

@@ -18,7 +18,7 @@ from conftest import (
     chat_reply,
     probe_json,
 )
-from voxmd import cli, errors
+from voxmd import __version__, cli, errors
 from voxmd import extract as extract_module
 from voxmd.config import CONFIG_ENV_VAR
 
@@ -123,6 +123,19 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=30
     )
     assert result.stdout.strip() == "", f"imported at startup: {result.stdout.strip()}"
+
+
+def test_version_prints_the_package_version_and_nothing_else() -> None:
+    result = runner.invoke(cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout == f"voxmd {__version__}\n"
+
+
+def test_version_matches_the_installed_metadata() -> None:
+    """One source of truth: pyproject reads the version from ``__init__``."""
+    from importlib.metadata import version
+
+    assert version("voxmd") == __version__
 
 
 # --- extract ----------------------------------------------------------------

@@ -67,7 +67,7 @@ FFMPEG_HINT = "ffmpeg provides both ffmpeg and ffprobe. Install it with:\n  brew
 WHISPER_HINT = (
     "whisper.cpp provides the whisper-cli binary. Install it with:\n"
     "  brew install whisper-cpp\n"
-    "See setup.md for the model weights, which are a separate download."
+    "The model weights are a separate download: see Setup in the voxmd README."
 )
 
 # whisper.cpp emits one line per segment. With -nt those are bare text, but the
@@ -301,12 +301,14 @@ def resolve_model(whisper: WhisperConfig) -> Path:
         raise DependencyError(
             "No whisper model configured.\n"
             "Pass --model /path/to/ggml-large-v3-turbo.bin, or set whisper.model "
-            "in your config. See setup.md for the download."
+            "in your config. The download is in Setup in the voxmd README."
         )
 
     model = whisper.model.expanduser()
     if not model.is_file():
-        raise DependencyError(f"Whisper model not found: {model}\nSee setup.md for the download.")
+        raise DependencyError(
+            f"Whisper model not found: {model}\nThe download is in Setup in the voxmd README."
+        )
     if not os.access(model, os.R_OK):
         raise DependencyError(f"Whisper model is not readable: {model}")
     return model

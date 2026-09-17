@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import os
 import signal
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -278,9 +279,10 @@ def test_a_file_deleted_while_waiting_is_reported_not_crashed(inbox: Path) -> No
 
 def test_this_machines_observer_is_event_driven() -> None:
     """C4 asserted against the real watchdog install, not a fake."""
+    expected = {"darwin": "FSEventsObserver", "linux": "InotifyObserver"}[sys.platform]
     observer = watch_mod.make_observer()
     try:
-        assert check_observer(observer) == "FSEventsObserver"
+        assert check_observer(observer) == expected
     finally:
         observer.stop()
 
