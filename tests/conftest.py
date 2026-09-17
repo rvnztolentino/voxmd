@@ -130,6 +130,7 @@ WHISPER_READY = {"sample_rate": 16_000, "channels": 1, "codec": "pcm_s16le"}
 VALID_EXTRACTION = {
     "title": "Ship date",
     "summary": "Marco and Ana agreed to ship on Friday.",
+    "key_points": ["The build is ready", "Marco wants a Friday release"],
     "decisions": ["Ship on Friday"],
     "actions": ["Email the client"],
     "people": ["Marco", "Ana"],

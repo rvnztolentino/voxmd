@@ -50,6 +50,9 @@ KINDS = ("people", "topics")
 LINK_UNSAFE = re.compile(r'[\[\]#^|\\/:*?"<>]')
 _NOT_WORD = re.compile(r"[\W_]+")
 _SPACES = re.compile(r"\s+")
+# "%%" opens an Obsidian comment. Inside a link or a file name it can't be
+# escaped without changing the target, so a run is reduced to a single "%".
+_COMMENT_RUN = re.compile(r"%{2,}")
 
 
 def normalize(name: str) -> str:
@@ -62,6 +65,7 @@ def normalize(name: str) -> str:
 def link_target(name: str) -> str:
     """A name made safe to put inside ``[[ ]]``, or ``""`` if nothing usable is left."""
     text = LINK_UNSAFE.sub(" ", clean_text(name, limit=MAX_ENTITY_CHARS))
+    text = _COMMENT_RUN.sub("%", text)
     return _SPACES.sub(" ", text).strip(" .")
 
 

@@ -6,15 +6,17 @@ keeps it safe:
 1. **Cheap checks first.** The vault exists, the template compiles, the
    entities file is valid, the audio is acceptable. A typo fails in
    milliseconds, not after a minute of transcription.
-2. **Skip what's done.** The recording is hashed and looked up in the ledger.
-   One already processed is skipped unless forced, so a re-run never
-   duplicates a note.
+2. **Know what's done.** The recording is hashed and looked up in the ledger.
+   New audio, or a new upload of audio seen before, gets a note (``Title 2.md``
+   for a repeat). The same file left untouched where it was processed is
+   skipped unless forced, so a watcher restart doesn't duplicate its own
+   leftovers. ``vault.duplicates: skip`` skips every repeat instead.
 3. **Transcribe.** whisper-cli has exited and been reaped when this returns,
    and that is then *checked*: voxmd must have no child process left before
    Ollama is asked to load a model. The two models are never resident together.
 4. **Extract**, with ``keep_alive=0``, so Ollama unloads as soon as it answers.
-5. **Write the note** under a name no other file has, never replacing one, and
-   read it back to verify.
+5. **Write the transcript, then the note** that links to it, each under a name
+   no other file has, never replacing one, and read back to verify.
 6. **Only then** record it in the ledger, append new entities, and move the
    recording to the archive. Any failure before this point leaves the
    recording exactly where it was, so the next run retries it.
@@ -30,7 +32,7 @@ import os
 import time
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,13 +52,14 @@ from .errors import (
 )
 from .extract import ExtractionResult
 from .ledger import LEDGER_NAME, Ledger, LedgerEntry, hash_file
-from .render import NoteMeta, load_template, render_note
+from .render import NoteMeta, load_template, render_note, render_transcript
 from .transcribe import AUDIO_SUFFIXES, TranscriptionResult, transcribe
 
 LOCK_NAME = "process.lock"
 LOCK_TIMEOUT_S = 1.0
 MAX_TITLE_BYTES = 120
 FALLBACK_TITLE = "Voice memo"
+TRANSCRIPT_SUFFIX = " (transcript)"
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,7 @@ class ProcessResult:
     """Already in the ledger; nothing was run or written."""
     processed_at: datetime | None = None
     """For a skipped recording, when it was first processed."""
+    transcript: Path | None = None
     archived: Path | None = None
     entities_added: int = 0
     transcription: TranscriptionResult | None = None
@@ -85,6 +89,7 @@ def process(
     created: datetime | None = None,
     force: bool = False,
     archive: bool = True,
+    lock_timeout_s: float = LOCK_TIMEOUT_S,
     on_stage: Callable[[str], None] | None = None,
     client: Any = None,
 ) -> ProcessResult:
@@ -92,7 +97,10 @@ def process(
 
     ``created`` overrides the recording time, which otherwise comes from the
     container's creation_time tag, then the file's modification time.
-    ``client`` is an injectable Ollama client for tests.
+    ``lock_timeout_s`` is how long to wait for another voxmd run to finish: a
+    person at a prompt wants to be told straight away, so the default is a
+    second, while ``voxmd watch`` passes minutes because it has nothing better
+    to do than wait. ``client`` is an injectable Ollama client for tests.
     """
     started = time.monotonic()
     stage = on_stage or (lambda _name: None)
@@ -115,14 +123,14 @@ def process(
     state_dir = prepare_state_dir(settings.state.dir)
 
     with contextlib.ExitStack() as stack:
-        _lock_run(stack, state_dir)
+        _lock_run(stack, state_dir, lock_timeout_s)
         ledger = Ledger.load(state_dir / LEDGER_NAME, max_bytes=limits.max_ledger_bytes)
 
         before = source.stat()
         stage("hashing")
         digest = hash_file(source, max_bytes=limits.max_audio_bytes)
         seen = ledger.get(digest)
-        if seen is not None and not force:
+        if seen is not None and not force and should_skip(seen, source, before, settings):
             return ProcessResult(
                 source=source,
                 note=Path(seen.note),
@@ -144,22 +152,56 @@ def process(
         stage("writing")
         probe = transcription.probe
         when = created or probe.created or _modified(before)
-        rendered = render_note(
-            extraction.extraction,
-            meta=NoteMeta(created=when, source=source.name, duration_s=probe.duration_s),
-            entities=known,
-            template=template,
-            template_label=template_label,
-        )
+        meta = NoteMeta(created=when, source=source.name, duration_s=probe.duration_s)
         name = note_filename(extraction.extraction.title, when)
-        note = write_note(notes_dir, vault_root, name, rendered.markdown)
+        problems: list[str] = []
+
+        # The transcript goes first, so the note can link to the name it
+        # actually got. It is secondary: failing to save it costs the link,
+        # not the note.
+        transcript = None
+        if settings.vault.transcripts:
+            try:
+                transcript = write_transcript(
+                    notes_dir / settings.vault.transcripts_folder,
+                    vault_root,
+                    name,
+                    render_transcript(
+                        transcription.text,
+                        title=extraction.extraction.title,
+                        meta=meta,
+                        max_bytes=limits.max_transcript_bytes,
+                    ),
+                )
+            except VoxmdError as exc:
+                problems.append(f"The transcript was not saved: {exc}")
+
+        try:
+            link = transcript.relative_to(vault_root).with_suffix("") if transcript else None
+            rendered = render_note(
+                extraction.extraction,
+                meta=replace(meta, transcript=link.as_posix() if link else None),
+                entities=known,
+                template=template,
+                template_label=template_label,
+            )
+            note = write_note(notes_dir, vault_root, name, rendered.markdown)
+        except BaseException:
+            # A transcript with no note would be an orphan, and the retry would
+            # write a second one. It is voxmd's own file from a moment ago.
+            if transcript is not None:
+                transcript.unlink(missing_ok=True)
+            raise
 
         entry = LedgerEntry(
             source=str(source),
             size=before.st_size,
             processed_at=datetime.now().astimezone(),
             note=str(note),
+            transcript=str(transcript) if transcript else None,
             duration_s=probe.duration_s,
+            mtime_ns=before.st_mtime_ns,
+            earlier=[*seen.earlier, seen.processed_at] if seen is not None else [],
         )
         try:
             ledger.record(digest, entry)
@@ -169,7 +211,6 @@ def process(
                 "The recording was left in place. Processing it again writes a second note."
             ) from exc
 
-        problems: list[str] = []
         added = 0
         try:
             added = update_entities(
@@ -203,6 +244,7 @@ def process(
     return ProcessResult(
         source=source,
         note=note,
+        transcript=transcript,
         archived=archived,
         entities_added=added,
         transcription=transcription,
@@ -210,6 +252,20 @@ def process(
         seconds=time.monotonic() - started,
         problems=tuple(problems),
     )
+
+
+def should_skip(seen: LedgerEntry, source: Path, info: os.stat_result, settings: Config) -> bool:
+    """Whether a recording whose audio is already in the ledger is left alone.
+
+    With ``vault.duplicates: skip``, always. With ``copy``, only when it is the
+    very same file, untouched where it was processed, and never archived: that
+    is a watcher restart finding its own leftovers, not a new upload.
+    """
+    if settings.vault.duplicates == "skip":
+        return True
+    same_place = seen.source == str(source) and seen.archived is None
+    untouched = seen.mtime_ns is None or seen.mtime_ns == info.st_mtime_ns
+    return same_place and untouched
 
 
 def resolve_notes_dir(vault: VaultConfig) -> tuple[Path, Path]:
@@ -323,6 +379,20 @@ def write_note(directory: Path, vault_root: Path, name: str, markdown: str) -> P
     return note
 
 
+def transcript_filename(note_name: str) -> str:
+    """``2026-09-15 Ship date (transcript).md`` for ``2026-09-15 Ship date.md``."""
+    return f"{Path(note_name).stem}{TRANSCRIPT_SUFFIX}.md"
+
+
+def write_transcript(directory: Path, vault_root: Path, note_name: str, markdown: str) -> Path:
+    """Save the transcript note, with the same containment and no-overwrite rules as a note."""
+    try:
+        return write_note(directory, vault_root, transcript_filename(note_name), markdown)
+    except OutputError as exc:
+        reason = _reason(exc.__cause__) if exc.__cause__ else "it did not read back intact"
+        raise OutputError(f"could not write into {directory}: {reason}") from exc
+
+
 def archive_recording(given: Path, source: Path, directory: Path) -> Path | None:
     """Move the recording into the archive. None when it is already there."""
     if given.is_symlink():
@@ -337,10 +407,10 @@ def archive_recording(given: Path, source: Path, directory: Path) -> Path | None
     return safe.move_no_replace(source, resolved)
 
 
-def _lock_run(stack: contextlib.ExitStack, state_dir: Path) -> None:
+def _lock_run(stack: contextlib.ExitStack, state_dir: Path, timeout_s: float) -> None:
     try:
         stack.enter_context(
-            safe.file_lock(state_dir / LOCK_NAME, timeout_s=LOCK_TIMEOUT_S, what=str(state_dir))
+            safe.file_lock(state_dir / LOCK_NAME, timeout_s=timeout_s, what=str(state_dir))
         )
     except ToolTimeout as exc:
         raise ToolTimeout(

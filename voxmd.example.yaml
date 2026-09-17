@@ -65,13 +65,59 @@ vault:
   # vault root.
   folder: Voice memos
 
+  # The same audio processed again, under any name: `copy` writes another note
+  # (Title 2.md), `skip` does nothing. The very same file, unchanged where it
+  # was processed, is never redone either way.
+  duplicates: copy
+
+  # Save each memo's full transcript as its own note, linked from the memo's
+  # note, so you can check the summary against what was actually said. Turn it
+  # off if you'd rather the vault held summaries only.
+  transcripts: true
+
+  # Where transcripts go, relative to the notes folder.
+  transcripts_folder: Transcripts
+
 archive:
   # Recordings move here after their note is written and verified. Created if
   # missing (its parent must exist). Omit to leave recordings where they are.
-  # dir: ~/Documents/Voice memos archive
+  dir: ~/Documents/Voice memos archive
+
+watch:
+  # The folder your phone syncs memos into. `voxmd watch` needs this; it must
+  # already exist, and it must not contain archive.dir or state.dir, or voxmd's
+  # own writes would wake it up again.
+  dir: ~/Documents/Voice memos inbox
+
+  # A sync client writes a file in pieces, so voxmd waits for its size and
+  # modification time to hold still this long before reading it. Raise it on a
+  # slow connection.
+  stable_seconds: 3.0
+
+  # How often the arriving file is re-checked. This runs only while a file is
+  # actually being written, never while the watcher is idle.
+  poll_seconds: 0.5
+
+  # Give up on a file that is still growing (or still empty) after this long.
+  settle_timeout_s: 900
+
+  # How long the watcher waits for a manual `voxmd process` to finish before
+  # giving up on a file. A person at a prompt is told in 1s; the watcher waits,
+  # because it has nothing better to do.
+  lock_timeout_s: 600
+
+log:
+  # Every wake and every file the watcher handles, with timestamps. Omit to use
+  # voxmd.log inside state.dir. Never contains transcript text or model output,
+  # but it does record note paths, which contain the title.
+  # file: ~/.local/state/voxmd/voxmd.log
+
+  # Past this, the log is rolled to <name>.1 and a new one started.
+  max_mb: 8
 
 state:
-  # The ledger of processed recordings, so nothing is processed twice.
+  # The ledger of processed recordings, so nothing is processed twice, plus the
+  # watcher's lock and the state `voxmd status` reads.
   dir: ~/.local/state/voxmd
 
 limits:

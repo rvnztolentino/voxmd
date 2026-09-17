@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 import stat
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -40,8 +40,14 @@ class LedgerEntry(BaseModel):
     source: str
     """Where the recording was when it was processed."""
     size: int = Field(ge=0)
+    mtime_ns: int | None = None
+    """The file's modification time then, to tell that same file, left in place,
+    from a new upload of the same audio. Missing on entries from before it existed."""
     processed_at: datetime
+    earlier: list[datetime] = Field(default_factory=list)
+    """When this audio was processed before, if it has been copied since."""
     note: str
+    transcript: str | None = None
     archived: str | None = None
     duration_s: float | None = None
 
@@ -97,6 +103,20 @@ class Ledger:
     def get(self, digest: str) -> LedgerEntry | None:
         return self._document.entries.get(digest)
 
+    def processed_on(self, day: date) -> int:
+        """How many recordings were processed on ``day``, local time.
+
+        This is where ``voxmd status`` gets "files processed today" from, so the
+        count covers manual ``voxmd process`` runs as well as the watcher's —
+        which is the honest answer to "what did voxmd do today".
+        """
+        return sum(
+            1
+            for entry in self._document.entries.values()
+            for when in (*entry.earlier, entry.processed_at)
+            if _local_day(when) == day
+        )
+
     def record(self, digest: str, entry: LedgerEntry) -> None:
         """Add or replace one entry, and write the whole ledger atomically."""
         if not _DIGEST.fullmatch(digest):
@@ -112,6 +132,11 @@ class Ledger:
             safe.atomic_write_text(self.path, text)
         except OSError as exc:
             raise OutputError(f"Could not write {self.path}: {exc.strerror or exc}") from exc
+
+
+def _local_day(when: datetime) -> date:
+    """The date in this machine's timezone, however it was stored."""
+    return (when.astimezone() if when.tzinfo is not None else when).date()
 
 
 def _read(path: Path, max_bytes: int) -> LedgerFile:

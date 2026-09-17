@@ -18,7 +18,7 @@ from conftest import (
     chat_reply,
     probe_json,
 )
-from voxmd import cli
+from voxmd import cli, errors
 from voxmd import extract as extract_module
 from voxmd.config import CONFIG_ENV_VAR
 
@@ -114,7 +114,8 @@ def test_help_imports_no_stage_modules_or_heavy_dependencies() -> None:
         "import sys, voxmd.cli; "
         "heavy = {'voxmd.config', 'voxmd.transcribe', 'voxmd.extract', 'voxmd.schema', "
         "'voxmd.render', 'voxmd.entities', 'voxmd.pipeline', 'voxmd.ledger', 'voxmd.doctor', "
-        "'pydantic', 'yaml', 'ollama', 'httpx', 'jinja2', 'rapidfuzz'}; "
+        "'voxmd.watcher', 'voxmd.status', 'voxmd.logging_setup', "
+        "'pydantic', 'yaml', 'ollama', 'httpx', 'jinja2', 'rapidfuzz', 'watchdog'}; "
         "loaded = sorted(heavy & set(sys.modules)); "
         "print(','.join(loaded))"
     )
@@ -312,7 +313,7 @@ def test_process_prints_only_the_note_path(recording: Path, tmp_path: Path) -> N
     assert result.stderr == ""
 
 
-def test_process_skips_a_recording_it_has_already_done(recording: Path) -> None:
+def test_process_leaves_the_same_unchanged_file_alone(recording: Path) -> None:
     first = runner.invoke(cli.app, ["process", str(recording)])
     second = runner.invoke(cli.app, ["process", str(recording)])
 
@@ -473,3 +474,137 @@ def test_models_reports_an_unreachable_ollama(monkeypatch: pytest.MonkeyPatch) -
     result = runner.invoke(cli.app, ["models"])
 
     assert isinstance(result.exception, DependencyError)
+
+
+# --- watch ------------------------------------------------------------------
+
+
+@pytest.fixture
+def watch_setup(tmp_path: Path) -> Path:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (tmp_path / "vault").mkdir()
+    (tmp_path / "voxmd.yaml").write_text(
+        f"vault:\n  path: {tmp_path / 'vault'}\n"
+        f"watch:\n  dir: {inbox}\n"
+        f"state:\n  dir: {tmp_path / 'state'}\n"
+    )
+    return inbox
+
+
+def test_watch_runs_the_watcher_and_logs_where_it_says_it_will(
+    watch_setup: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voxmd import watcher as watcher_module
+
+    seen: dict[str, object] = {}
+
+    def fake_watch(settings, *, log, **kwargs):  # type: ignore[no-untyped-def]
+        seen["watch_dir"] = settings.watch.dir
+        seen["log"] = log.path
+        log.event("watch.start", pid=1)
+        return None
+
+    monkeypatch.setattr(watcher_module, "watch", fake_watch)
+
+    result = runner.invoke(cli.app, ["watch"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["watch_dir"] == watch_setup
+    assert seen["log"] == tmp_path / "state" / "voxmd.log"
+    assert "watch.start" in (tmp_path / "state" / "voxmd.log").read_text()
+    # vision.md: "Log to a file, not stdout." The echo goes to stderr so the
+    # terminal shows the work, and stdout stays empty.
+    assert result.stdout == ""
+    assert "watch.start" in result.stderr
+
+
+def test_watch_takes_the_folder_from_the_flag(
+    watch_setup: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voxmd import watcher as watcher_module
+
+    other = tmp_path / "other inbox"
+    other.mkdir()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        watcher_module,
+        "watch",
+        lambda settings, **kwargs: seen.update(dir=settings.watch.dir, model=settings.ollama.model),
+    )
+
+    result = runner.invoke(cli.app, ["watch", "--dir", str(other), "-m", "gemma3:4b"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == {"dir": other, "model": "gemma3:4b"}
+
+
+def test_watch_without_a_folder_says_what_to_set(tmp_path: Path) -> None:
+    (tmp_path / "vault").mkdir()
+    (tmp_path / "voxmd.yaml").write_text(
+        f"vault:\n  path: {tmp_path / 'vault'}\nstate:\n  dir: {tmp_path / 'state'}\n"
+    )
+
+    result = runner.invoke(cli.app, ["watch"])
+
+    assert isinstance(result.exception, errors.ConfigError)
+    assert "watch.dir" in str(result.exception)
+
+
+# --- status -----------------------------------------------------------------
+
+
+def test_status_with_nothing_running(watch_setup: Path) -> None:
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "not running" in result.stdout
+    assert "no watcher has run here" in result.stdout
+    assert "0 recording(s) processed" in result.stdout
+
+
+def test_status_reports_a_live_watcher(
+    watch_setup: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from datetime import datetime
+
+    from voxmd import status as status_module
+    from voxmd.status import WatchState, state_path, write_state
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    write_state(
+        state_path(state_dir),
+        WatchState(
+            pid=os.getpid(),
+            started_at=datetime(2026, 9, 17, 9, 30).astimezone(),
+            watch_dir=str(watch_setup),
+            log=str(state_dir / "voxmd.log"),
+            observer="FSEventsObserver",
+            last_wake=datetime(2026, 9, 17, 10, 15).astimezone(),
+            last_wake_trigger="created",
+            wakes=4,
+            processed=3,
+        ),
+    )
+    monkeypatch.setattr(status_module, "pid_is_voxmd", lambda _pid: True)
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert f"running (pid {os.getpid()})" in result.stdout
+    assert "since 2026-09-17 09:30" in result.stdout
+    assert str(watch_setup) in result.stdout
+    assert "FSEventsObserver (filesystem events, not polling)" in result.stdout
+    assert "2026-09-17 10:15:00 (created)" in result.stdout
+    assert "3 processed, 0 failed, 4 wakes" in result.stdout
+
+
+def test_status_creates_nothing(watch_setup: Path, tmp_path: Path) -> None:
+    before = sorted(tmp_path.rglob("*"))
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(tmp_path.rglob("*")) == before

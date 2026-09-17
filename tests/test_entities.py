@@ -230,3 +230,9 @@ class TestConfig:
     def test_threshold_is_bounded(self, threshold: int) -> None:
         with pytest.raises(ValidationError):
             EntitiesConfig(fuzzy_threshold=threshold)
+
+
+def test_a_link_target_never_holds_a_comment_marker() -> None:
+    from voxmd.entities import link_target
+
+    assert link_target("Ana%%%x 10%") == "Ana%x 10%"

@@ -6,8 +6,11 @@ import errno
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -110,8 +113,13 @@ def env(tmp_path: Path, fake_run: FakeRunner, fake_tools: None, model_file: Path
 
 
 def only_note(env: Env) -> Path:
-    (note,) = env.notes.iterdir()
+    (note,) = env.notes.glob("*.md")
     return note
+
+
+def only_transcript(env: Env) -> Path:
+    (transcript,) = (env.notes / "Transcripts").glob("*.md")
+    return transcript
 
 
 # --- the happy path ---------------------------------------------------------
@@ -226,7 +234,74 @@ def test_the_child_process_check_passes_with_no_children() -> None:
 # --- idempotency ------------------------------------------------------------
 
 
-def test_the_same_recording_is_skipped_even_under_another_name(env: Env) -> None:
+def test_the_same_audio_uploaded_again_gets_a_second_note(env: Env) -> None:
+    """A re-upload is a request for a note, even of audio seen before."""
+    first = env.run()
+    original = first.note.read_text()
+    env.restore_audio()
+
+    second = env.run()
+
+    assert not second.skipped
+    assert second.note == env.notes / "2026-09-15 Ship date 2.md"
+    assert second.transcript is not None and second.transcript.name.endswith("(transcript) 2.md")
+    assert first.note.read_text() == original
+    assert second.archived == env.archive / "memo 2.m4a"
+
+
+def test_the_same_audio_under_another_name_also_gets_a_note(env: Env) -> None:
+    first = env.run()
+    again = env.audio.with_name("renamed.m4a")
+    again.write_bytes(env.data)
+
+    result = process(again, settings=env.settings, client=env.client)
+
+    assert not result.skipped
+    assert result.note != first.note
+    assert len(env.client.chats) == 2
+
+
+def test_a_file_left_untouched_where_it_was_processed_is_not_redone(env: Env) -> None:
+    """Without an archive, a watcher restart must not duplicate its own leftovers."""
+    env.settings = env.settings_with(archive={"dir": None})
+    first = env.run()
+    calls = len(env.runner.calls)
+
+    result = env.run()
+
+    assert result.skipped
+    assert result.note == first.note
+    assert result.processed_at is not None
+    assert len(env.runner.calls) == calls
+    assert len(env.client.chats) == 1
+    assert len(list(env.notes.glob("*.md"))) == 1
+
+
+def test_a_file_replaced_in_place_counts_as_a_new_upload(env: Env) -> None:
+    env.settings = env.settings_with(archive={"dir": None})
+    env.run()
+    stamp = env.audio.stat().st_mtime + 60
+    os.utime(env.audio, (stamp, stamp))
+
+    result = env.run()
+
+    assert not result.skipped
+    assert result.note.name == "2026-09-15 Ship date 2.md"
+
+
+def test_an_entry_from_before_mtimes_were_recorded_still_protects_leftovers(env: Env) -> None:
+    env.settings = env.settings_with(archive={"dir": None})
+    env.run()
+    ledger = env.ledger()
+    old = ledger.get(env.digest)
+    assert old is not None
+    ledger.record(env.digest, old.model_copy(update={"mtime_ns": None}))
+
+    assert env.run().skipped
+
+
+def test_skip_mode_brings_back_skipping_every_repeat(env: Env) -> None:
+    env.settings = env.settings_with(vault={"duplicates": "skip"})
     first = env.run()
     again = env.audio.with_name("renamed.m4a")
     again.write_bytes(env.data)
@@ -236,11 +311,21 @@ def test_the_same_recording_is_skipped_even_under_another_name(env: Env) -> None
 
     assert result.skipped
     assert result.note == first.note
-    assert result.processed_at is not None
     assert len(env.runner.calls) == calls
-    assert len(env.client.chats) == 1
     assert again.exists()
-    assert only_note(env) == first.note
+
+
+def test_every_copy_counts_toward_processed_today(env: Env) -> None:
+    env.run()
+    env.restore_audio()
+    env.run()
+    env.restore_audio()
+    env.client.replies.append(chat_reply())
+    env.run()
+
+    entry = env.ledger().get(env.digest)
+    assert entry is not None and len(entry.earlier) == 2
+    assert env.ledger().processed_on(entry.processed_at.astimezone().date()) == 3
 
 
 def test_force_writes_a_second_note_and_never_replaces_the_first(env: Env) -> None:
@@ -463,17 +548,43 @@ def test_a_corrupt_ledger_is_refused_before_transcribing(env: Env) -> None:
     assert env.runner.calls == []
 
 
-def test_a_second_concurrent_run_is_refused(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pipeline, "LOCK_TIMEOUT_S", 0.1)
+def test_a_second_concurrent_run_is_refused(env: Env) -> None:
     env.state.mkdir()
 
     with (
         safe.file_lock(env.state / pipeline.LOCK_NAME, timeout_s=1, what="test"),
         pytest.raises(ToolTimeout, match="Another voxmd process"),
     ):
-        env.run()
+        env.run(lock_timeout_s=0.1)
 
     assert env.runner.calls == []
+
+
+def test_a_person_at_a_prompt_is_told_within_a_second(env: Env) -> None:
+    """The default is short on purpose: the watcher passes a longer one."""
+    assert pipeline.LOCK_TIMEOUT_S == 1.0
+
+    env.state.mkdir()
+    started = time.monotonic()
+    with (
+        safe.file_lock(env.state / pipeline.LOCK_NAME, timeout_s=1, what="test"),
+        pytest.raises(ToolTimeout),
+    ):
+        env.run()
+
+    assert time.monotonic() - started < 2.0
+
+
+def test_a_caller_that_can_wait_gets_the_lock_when_it_is_released(env: Env) -> None:
+    """How `voxmd watch` shares the machine with a manual run instead of failing."""
+    env.state.mkdir()
+    lock = safe.file_lock(env.state / pipeline.LOCK_NAME, timeout_s=1, what="test")
+    lock.__enter__()
+    threading.Timer(0.15, lambda: lock.__exit__(None, None, None)).start()
+
+    result = env.run(lock_timeout_s=10)
+
+    assert result.note.exists()
 
 
 # --- recording time ---------------------------------------------------------
@@ -533,3 +644,147 @@ def test_a_hostile_title_still_lands_inside_the_notes_folder(env: Env) -> None:
 
     assert result.note.parent == env.notes.resolve()
     assert result.note.name == "2026-09-15 tmp escape.md"
+
+
+# --- transcripts ------------------------------------------------------------
+
+
+def test_the_transcript_is_saved_as_its_own_note_and_linked(env: Env) -> None:
+    result = env.run()
+
+    transcript = only_transcript(env)
+    assert result.transcript == transcript
+    assert transcript.name == "2026-09-15 Ship date (transcript).md"
+    assert oct(transcript.stat().st_mode & 0o777) == "0o600"
+    text = transcript.read_text()
+    assert text.startswith("---\ndate: 2026-09-15T14:03\nsource: memo.m4a\n")
+    assert "# Ship date (transcript)" in text
+    assert TRANSCRIPT in text
+    assert "may be misheard" in text
+    assert (
+        "- [[Memos/Transcripts/2026-09-15 Ship date (transcript)|Full transcript]]"
+        in only_note(env).read_text()
+    )
+    recorded = env.ledger().get(env.digest)
+    assert recorded is not None and recorded.transcript == str(transcript)
+
+
+def test_the_link_follows_the_name_the_transcript_actually_got(env: Env) -> None:
+    """With --force the second transcript is numbered; its note must point at it."""
+    env.run()
+    env.restore_audio()
+    env.client.replies.append(chat_reply())
+
+    second = env.run(force=True)
+
+    assert second.transcript is not None
+    assert second.transcript.name == "2026-09-15 Ship date (transcript) 2.md"
+    assert "Ship date (transcript) 2|Full transcript]]" in second.note.read_text()
+
+
+def test_transcripts_can_be_switched_off(env: Env) -> None:
+    env.settings = env.settings_with(vault={"transcripts": False})
+
+    result = env.run()
+
+    assert result.transcript is None
+    assert not (env.notes / "Transcripts").exists()
+    assert "Full transcript" not in result.note.read_text()
+
+
+def test_the_transcripts_folder_is_configurable(env: Env) -> None:
+    env.settings = env.settings_with(vault={"transcripts_folder": "Raw/Text"})
+
+    result = env.run()
+
+    assert result.transcript == env.notes / "Raw" / "Text" / result.transcript.name
+    assert "[[Memos/Raw/Text/" in result.note.read_text()
+
+
+def test_a_transcript_that_cannot_be_saved_costs_the_link_not_the_note(env: Env) -> None:
+    (env.notes).mkdir(parents=True)
+    (env.notes / "Transcripts").write_text("a file where the folder should be")
+
+    result = env.run()
+
+    assert result.note.exists()
+    assert result.transcript is None
+    assert "Full transcript" not in result.note.read_text()
+    assert len(result.problems) == 1
+    assert result.problems[0].startswith("The transcript was not saved: could not write into")
+    assert not env.audio.exists(), "a missing transcript doesn't stop archiving"
+
+
+def test_a_note_that_fails_takes_its_new_transcript_with_it(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise the retry leaves an orphan behind and writes a numbered second one."""
+    real = safe.write_new_file
+    calls: list[str] = []
+
+    def fail_the_note(directory: Path, name: str, text: str, **kwargs: object) -> Path:
+        calls.append(name)
+        if "(transcript)" in name:
+            return real(directory, name, text, **kwargs)
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(safe, "write_new_file", fail_the_note)
+
+    with pytest.raises(OutputError, match="No space left"):
+        env.run()
+
+    assert len(calls) == 2
+    assert list((env.notes / "Transcripts").iterdir()) == []
+    assert env.audio.exists()
+    assert len(env.ledger()) == 0
+
+
+def test_a_transcript_is_escaped_like_model_output(env: Env) -> None:
+    """A recording is just as untrusted as the model: it can't make links or embeds."""
+    hostile = "Open [[Secret]] now. ![[x.png]] <img src=http://e.test/p> %%hide%% #tag. Done."
+    env.runner.set("whisper-cli", stdout=hostile)
+
+    env.run()
+
+    body = only_transcript(env).read_text().split("---\n", 2)[2]
+    assert re.search(r"(?<!\\)\[\[", body) is None
+    assert re.search(r"(?<!\\)<", body) is None
+    assert "%%" not in body.replace("\\%", "")
+    assert "\\#tag" in body
+
+
+def test_a_transcripts_folder_symlinked_out_of_the_vault_is_refused(env: Env) -> None:
+    outside = env.root / "outside"
+    outside.mkdir()
+    env.notes.mkdir(parents=True)
+    (env.notes / "Transcripts").symlink_to(outside)
+
+    result = env.run()
+
+    assert list(outside.iterdir()) == []
+    assert result.transcript is None
+    assert "outside the vault" in result.problems[0]
+
+
+def test_the_transcript_is_split_into_readable_paragraphs(env: Env) -> None:
+    sentences = " ".join(f"Sentence number {n}." for n in range(1, 10))
+    env.runner.set("whisper-cli", stdout=sentences)
+
+    env.run()
+
+    body = only_transcript(env).read_text().split("\n# ", 1)[1]
+    paragraphs = [p for p in body.split("\n\n")[1:] if p.startswith("Sentence")]
+    assert len(paragraphs) == 3
+    assert paragraphs[0] == " ".join(f"Sentence number {n}." for n in range(1, 5))
+
+
+def test_a_title_cannot_smuggle_a_comment_marker_into_the_transcript_link(env: Env) -> None:
+    """File names and links can't be escaped, so "%%" is reduced to "%" at the source."""
+    env.client.replies[:] = [chat_reply({**VALID_EXTRACTION, "title": "Plan %%hidden 50%"})]
+
+    result = env.run()
+
+    assert result.transcript is not None
+    assert "%%" not in result.note.name
+    assert "%%" not in result.transcript.name
+    assert "%%" not in result.note.read_text().replace("\\%", "")

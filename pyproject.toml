@@ -10,10 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
-# Pinned exactly, not ranged. Only the dependencies the built stages use are
-# here; watchdog is added by the branch that needs it rather than declared
-# speculatively up front. httpx is ollama's transport and is imported directly
-# (timeouts, error types), so it is pinned here too.
+# Pinned exactly, not ranged. httpx is ollama's transport and is imported
+# directly (timeouts, error types), so it is pinned here too. watchdog is only
+# imported by `voxmd watch`, which is why it stays out of the startup path.
 dependencies = [
     "typer==0.27.2",
     "pydantic==2.13.5",
@@ -22,6 +21,7 @@ dependencies = [
     "httpx==0.28.1",
     "jinja2==3.1.6",
     "rapidfuzz==3.14.6",
+    "watchdog==6.0.0",
 ]
 
 [project.scripts]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -127,3 +127,31 @@ class TestLedger:
 
         with pytest.raises(ValueError, match="SHA-256"):
             ledger.record("../../etc", entry())
+
+
+class TestProcessedOn:
+    """Where `voxmd status` gets "files processed today" from."""
+
+    def entry(self, when: datetime) -> LedgerEntry:
+        return LedgerEntry(source="/memo.m4a", size=1, processed_at=when, note="/note.md")
+
+    def test_it_counts_only_the_day_asked_for(self, tmp_path: Path) -> None:
+        ledger = Ledger.load(tmp_path / "ledger.json", max_bytes=1 << 20)
+        ledger.record("a" * 64, self.entry(datetime(2026, 9, 15, 0, 1).astimezone()))
+        ledger.record("b" * 64, self.entry(datetime(2026, 9, 15, 23, 59).astimezone()))
+        ledger.record("c" * 64, self.entry(datetime(2026, 9, 16, 9, 0).astimezone()))
+
+        assert ledger.processed_on(date(2026, 9, 15)) == 2
+        assert ledger.processed_on(date(2026, 9, 16)) == 1
+        assert ledger.processed_on(date(2026, 9, 17)) == 0
+
+    def test_an_entry_written_in_another_timezone_counts_in_this_one(self, tmp_path: Path) -> None:
+        ledger = Ledger.load(tmp_path / "ledger.json", max_bytes=1 << 20)
+        moment = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
+        ledger.record("d" * 64, self.entry(moment))
+
+        assert ledger.processed_on(moment.astimezone().date()) == 1
+
+    def test_an_empty_ledger_counts_nothing(self, tmp_path: Path) -> None:
+        ledger = Ledger.load(tmp_path / "ledger.json", max_bytes=1 << 20)
+        assert ledger.processed_on(date.today()) == 0

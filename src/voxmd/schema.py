@@ -13,9 +13,23 @@ import unicodedata
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 MAX_TITLE_CHARS = 120
-MAX_SUMMARY_CHARS = 2_000
+MAX_SUMMARY_CHARS = 4_000
+"""Room for the ten-sentence summary a long meeting gets, with margin."""
 MAX_ITEM_CHARS = 300
 MAX_ITEMS = 50
+
+# Words a model lists as "people" that aren't anyone's name. Kept out of the
+# note and, more importantly, out of entities.json, where they would turn every
+# later "you" into a [[you]] link. Compared case-insensitively, whole item only.
+_PRONOUNS = "i me my myself you your yourself he him his she her hers they them their we us our it"
+_TAGALOG_PRONOUNS = "ako akin ikaw ka kayo siya sila kami kita tayo"
+_PLACEHOLDERS = (
+    "someone|somebody|anyone|everyone|everybody|nobody|speaker|the speaker|narrator|"
+    "the narrator|host|the host|user|the user|caller|unknown|unnamed|person|a person|"
+    "friend|a friend|my friend|boss|my boss|manager|the manager|my manager|client|"
+    "the client|team|the team"
+)
+NOT_NAMES = frozenset([*_PRONOUNS.split(), *_TAGALOG_PRONOUNS.split(), *_PLACEHOLDERS.split("|")])
 
 # Unicode categories removed from every extracted string: control characters,
 # format characters (zero-width joiners, bidi overrides that can make a note
@@ -53,6 +67,48 @@ def _clean_items(values: list[str]) -> list[str]:
     return items
 
 
+_DETERMINERS = frozenset(
+    ["the", "a", "an", "my", "your", "his", "her", "our", "their", "this", "that"]
+)
+
+
+def looks_like_a_name(item: str) -> bool:
+    """Whether an extracted "person" plausibly is one.
+
+    A fixed list can't catch every way a model describes someone unnamed ("the
+    person", "her mom"), so two general rules back it up. In a script with
+    capital letters, a name has at least one; and a determiner followed only by
+    lowercase words is a description. Scripts without case (Chinese, Japanese,
+    Arabic) pass both rules untouched.
+    """
+    if item.casefold() in NOT_NAMES or not any(ch.isalpha() for ch in item):
+        return False
+    cased = [ch for ch in item if ch.isupper() or ch.islower()]
+    if cased and not any(ch.isupper() for ch in cased):
+        return False
+    first, _, rest = item.partition(" ")
+    return not (first.casefold() in _DETERMINERS and rest and rest == rest.lower())
+
+
+def _clean_people(values: list[str]) -> list[str]:
+    """Like any list, minus pronouns, roles, and descriptions of unnamed people."""
+    # Filtered before de-duplicating, so a lowercase "marco" can't knock out "Marco".
+    names = [_clean_items([value]) for value in values]
+    return _clean_items([item[0] for item in names if item and looks_like_a_name(item[0])])
+
+
+def _require_every_field(schema: dict[str, object]) -> None:
+    """Make the model's output grammar demand every field.
+
+    ``key_points`` has a default so extraction files written before it existed
+    still load, but a default would also make it optional for the model, and an
+    optional field is one a model quietly leaves out.
+    """
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        schema["required"] = list(properties)
+
+
 class Extraction(BaseModel):
     """Structured note content. Its JSON schema is also the model's output grammar.
 
@@ -60,15 +116,21 @@ class Extraction(BaseModel):
     extraction file edited by hand is cleaned exactly like a fresh one.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", json_schema_extra=_require_every_field)
 
     title: str = Field(description="Short descriptive title, at most 8 words.")
-    summary: str = Field(description="Two to four sentence summary of the memo.")
+    summary: str = Field(description="Summary of what was said, longer for longer recordings.")
+    key_points: list[str] = Field(
+        default_factory=list,
+        description="Main points, facts, or arguments, one per item. Empty if none.",
+    )
     decisions: list[str] = Field(description="Decisions that were made. Empty if none.")
     actions: list[str] = Field(
         description="Concrete follow-up tasks, each starting with a verb. Empty if none."
     )
-    people: list[str] = Field(description="Names of people mentioned. Empty if none.")
+    people: list[str] = Field(
+        description="Proper names of specific people. Never pronouns or roles. Empty if none."
+    )
     topics: list[str] = Field(description="One to five short topic names.")
 
     @field_validator("title")
@@ -87,10 +149,15 @@ class Extraction(BaseModel):
             raise ValueError("summary is empty")
         return cleaned
 
-    @field_validator("decisions", "actions", "people", "topics")
+    @field_validator("key_points", "decisions", "actions", "topics")
     @classmethod
     def _clean_lists(cls, values: list[str]) -> list[str]:
         return _clean_items(values)
+
+    @field_validator("people")
+    @classmethod
+    def _clean_names(cls, values: list[str]) -> list[str]:
+        return _clean_people(values)
 
 
 def describe_errors(exc: ValidationError, *, limit: int = 3) -> str:

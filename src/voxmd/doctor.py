@@ -54,7 +54,9 @@ def run_checks(config: Path | None = None, *, client: object = None) -> list[Che
     checks.extend(_ollama(settings, client))
     checks.append(_guard("vault", lambda: _vault(settings)))
     checks.append(_guard("archive", lambda: _archive(settings)))
+    checks.append(_guard("watch", lambda: _watch(settings)))
     checks.append(_guard("state", lambda: _state(settings)))
+    checks.append(_guard("log", lambda: _log(settings)))
     checks.append(_guard("template", lambda: _template(settings)))
     checks.append(_guard("entities", lambda: _entities(settings)))
     return checks
@@ -203,6 +205,31 @@ def _archive(settings: Config) -> tuple[str, str]:
         return FAIL, f"{target} is not writable"
     suffix = "" if directory.exists() else " (created on first process)"
     return OK, f"{directory}{suffix}"
+
+
+def _watch(settings: Config) -> tuple[str, str]:
+    from .watcher import check_layout, resolve_watch_dir
+
+    if settings.watch.dir is None:
+        return OK, "not set; `voxmd watch` needs watch.dir"
+    directory = resolve_watch_dir(settings.watch)
+    check_layout(directory, resolve_archive_dir(settings.archive), settings.state.dir)
+    return OK, str(directory)
+
+
+def _log(settings: Config) -> tuple[str, str]:
+    from .logging_setup import log_path
+
+    path = log_path(settings.log.file, settings.state.dir)
+    if path.exists():
+        if not path.is_file() or not os.access(path, os.W_OK):
+            return FAIL, f"{path} is not a writable file"
+        return OK, f"{path} ({safe.human_bytes(path.stat().st_size)})"
+    if not path.parent.exists():
+        return OK, f"{path} (created on first watch)"
+    if not os.access(path.parent, os.W_OK):
+        return FAIL, f"{path.parent} is not writable"
+    return OK, f"{path} (created on first watch)"
 
 
 def _state(settings: Config) -> tuple[str, str]:

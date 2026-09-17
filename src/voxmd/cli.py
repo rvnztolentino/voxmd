@@ -354,7 +354,7 @@ def process(
     ] = None,
     force: Annotated[
         bool,
-        typer.Option("--force", help="Process it again even if the ledger says it's done."),
+        typer.Option("--force", help="Write another note even for the same, unchanged file."),
     ] = False,
     no_archive: Annotated[
         bool,
@@ -380,7 +380,8 @@ def process(
     """Transcribe, extract, and render a recording into a new note in your vault.
 
     Prints the note's path. The recording moves to archive.dir only after the
-    note is written and verified. A recording already processed is skipped.
+    note is written and verified. Processing the same audio again writes
+    another note (Title 2.md), unless it is the very same file, unchanged.
     """
     from .config import apply_overrides, load_config
     from .errors import PartialFailure
@@ -409,7 +410,7 @@ def process(
     if result.skipped:
         when = f" on {result.processed_at:%Y-%m-%d %H:%M}" if result.processed_at else ""
         typer.secho(
-            f"voxmd: already processed{when}; pass --force to process it again.",
+            f"voxmd: already processed{when}; pass --force to write another note.",
             fg=typer.colors.YELLOW,
             err=True,
         )
@@ -432,6 +433,8 @@ def process(
             f"ollama:   {extraction.seconds:.1f}s "
             f"(load {extraction.load_seconds:.1f}s, attempts {extraction.attempts})"
         )
+        # Saved or not, never the path: it contains the title.
+        _note(f"transcript: {'saved' if result.transcript else 'not saved'}")
         _note(f"entities: {result.entities_added} added")
         _note(f"archive:  {result.archived or 'not moved'}")
         _note(f"total:    {result.seconds:.1f}s")
@@ -444,6 +447,125 @@ def process(
         raise PartialFailure(
             f"The note was written, but {len(result.problems)} later step(s) failed; see above."
         )
+
+
+@app.command()
+def watch(
+    directory: Annotated[
+        Path | None,
+        typer.Option(
+            "--dir",
+            "-d",
+            help="Folder to watch. Overrides watch.dir in config.",
+            show_default=False,
+        ),
+    ] = None,
+    vault: Annotated[
+        Path | None,
+        typer.Option(
+            "--vault",
+            help="Obsidian vault folder. Overrides vault.path in config.",
+            show_default=False,
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Ollama model name. Overrides ollama.model in config.",
+            show_default=False,
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Watch a folder and turn each recording that lands in it into a note.
+
+    Runs in the foreground until you stop it with Ctrl-C, and stops with the
+    terminal. It installs nothing: no LaunchAgent, no login item, no cron entry,
+    nothing that survives a reboot. Every wake and every file is written to the
+    log, which is also echoed here.
+    """
+    from .config import apply_overrides, load_config
+    from .logging_setup import EventLog, log_path
+    from .pipeline import prepare_state_dir
+    from .watcher import watch as run_watch
+
+    settings = load_config(config)
+    overrides: dict[str, object] = {}
+    if directory is not None:
+        overrides["watch"] = apply_overrides(settings.watch, dir=directory.expanduser().absolute())
+    if vault is not None:
+        overrides["vault"] = apply_overrides(settings.vault, path=vault.expanduser().absolute())
+    if model is not None:
+        overrides["ollama"] = apply_overrides(settings.ollama, model=model)
+    if overrides:
+        settings = settings.model_copy(update=overrides)
+
+    state_dir = prepare_state_dir(settings.state.dir)
+    path = log_path(settings.log.file, state_dir)
+    with EventLog(path, max_bytes=settings.log.max_mb * 1024 * 1024, echo=sys.stderr) as log:
+        run_watch(settings, log=log)
+
+
+@app.command()
+def status(
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file. Defaults to $VOXMD_CONFIG, ./voxmd.yaml, then "
+            "~/.config/voxmd/config.yaml.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Say whether a watcher is running, and what voxmd has processed today.
+
+    Read-only: it starts nothing, stops nothing, and creates nothing.
+    """
+    from .config import load_config
+    from .status import status as read_status
+
+    settings = load_config(config)
+    found = read_status(settings)
+    state = found.state
+
+    if found.running and state is not None:
+        running = typer.style(f"running ({found.detail})", fg=typer.colors.GREEN)
+        _row("watcher", f"{running} since {state.started_at:%Y-%m-%d %H:%M}")
+        _row("folder", state.watch_dir)
+        _row("observer", f"{state.observer} (filesystem events, not polling)")
+        wake = (
+            f"{state.last_wake:%Y-%m-%d %H:%M:%S} ({state.last_wake_trigger})"
+            if state.last_wake
+            else "nothing seen yet"
+        )
+        _row("last wake", wake)
+        _row("this run", f"{state.processed} processed, {state.failed} failed, {state.wakes} wakes")
+    else:
+        _row("watcher", typer.style(f"not running ({found.detail})", fg=typer.colors.YELLOW))
+        if state is not None:
+            _row("folder", state.watch_dir)
+
+    if found.ledger_error is not None:
+        _row("today", f"unknown: {found.ledger_error.splitlines()[0]}")
+    else:
+        _row("today", f"{found.processed_today} recording(s) processed")
+        _row("all time", f"{found.total_processed} recording(s) processed")
+    if found.log is not None:
+        exists = "" if found.log.exists() else " (not written yet)"
+        _row("log", f"{found.log}{exists}")
 
 
 @app.command()
@@ -528,6 +650,10 @@ def models(
 
 def _note(message: str) -> None:
     typer.secho(message, fg=typer.colors.BRIGHT_BLACK, err=True)
+
+
+def _row(label: str, value: str) -> None:
+    typer.echo(f"  {label:<11}{value}")
 
 
 def main() -> None:

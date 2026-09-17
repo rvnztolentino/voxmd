@@ -26,7 +26,7 @@ import os
 import re
 import urllib.parse
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import yaml
 from pydantic import (
@@ -242,6 +242,19 @@ class VaultConfig(BaseModel):
     """Folder inside the vault for new notes, created if missing. ``None`` is
     the vault root."""
 
+    duplicates: Literal["copy", "skip"] = "copy"
+    """A recording whose audio was processed before. ``copy`` writes another
+    note (``Title 2.md``); ``skip`` does nothing. Either way, the very same file
+    still sitting where it was, unchanged, is never redone: otherwise every
+    watcher restart would duplicate whatever it left in the folder."""
+
+    transcripts: bool = True
+    """Save each memo's full transcript as its own note, linked from the memo's
+    note, so what the model wrote can be checked against what was said."""
+
+    transcripts_folder: Path = Path("Transcripts")
+    """Where transcripts go, relative to the notes folder. Created if missing."""
+
     @field_validator("path")
     @classmethod
     def _check_path(cls, value: Path | None) -> Path | None:
@@ -255,6 +268,21 @@ class VaultConfig(BaseModel):
         if value.is_absolute() or str(value).startswith("~") or ".." in value.parts:
             raise ValueError("vault.folder must be a relative path inside the vault, without '..'")
         return value if value.parts else None
+
+    @field_validator("transcripts_folder")
+    @classmethod
+    def _check_transcripts_folder(cls, value: Path) -> Path:
+        if (
+            value.is_absolute()
+            or str(value).startswith("~")
+            or ".." in value.parts
+            or not value.parts
+        ):
+            raise ValueError(
+                "vault.transcripts_folder must be a relative folder inside the notes folder, "
+                "without '..'"
+            )
+        return value
 
 
 class ArchiveConfig(BaseModel):
@@ -270,6 +298,57 @@ class ArchiveConfig(BaseModel):
     @classmethod
     def _check_dir(cls, value: Path | None) -> Path | None:
         return _absolute(value, "archive.dir") if value is not None else None
+
+
+class WatchConfig(BaseModel):
+    """What ``voxmd watch`` watches, and how it waits for a file to finish arriving."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dir: Path | None = None
+    """The folder your phone syncs memos into. It must already exist: voxmd
+    never creates it, so a typo fails instead of watching an empty new folder
+    forever."""
+
+    stable_seconds: float = Field(default=3.0, ge=0.5, le=60)
+    """How long a file's size and mtime must hold still before it is read. A
+    sync client writes a file in pieces; transcribing it half-written would
+    produce a truncated note."""
+
+    poll_seconds: float = Field(default=0.5, ge=0.1, le=5)
+    """How often the settling file is re-checked. This runs only while a file
+    is actually arriving, never while the watcher is idle."""
+
+    settle_timeout_s: float = Field(default=900.0, gt=0)
+    """Give up on a file still growing after this long, and say so."""
+
+    lock_timeout_s: float = Field(default=600.0, gt=0)
+    """How long the watcher waits for a manual ``voxmd process`` to finish
+    before giving up on a file. A human running one command wants to be told
+    immediately (1s); a watcher has all day, so it waits instead of failing."""
+
+    @field_validator("dir")
+    @classmethod
+    def _check_dir(cls, value: Path | None) -> Path | None:
+        return _absolute(value, "watch.dir") if value is not None else None
+
+
+class LogConfig(BaseModel):
+    """The watcher's log file. Every wake and every file, with timestamps."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file: Path | None = None
+    """``None`` means ``voxmd.log`` inside ``state.dir``."""
+
+    max_mb: int = Field(default=8, ge=1)
+    """Past this, the log is rolled to ``<name>.1`` and a new one started, so a
+    watcher left running for months can't fill the disk."""
+
+    @field_validator("file")
+    @classmethod
+    def _check_file(cls, value: Path | None) -> Path | None:
+        return _absolute(value, "log.file") if value is not None else None
 
 
 class StateConfig(BaseModel):
@@ -357,12 +436,30 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_sections_are_defaults(cls, data: object) -> object:
+        """Treat ``archive:`` with everything under it commented out as ``archive: {}``.
+
+        YAML reads a section whose every key is a comment as null, so commenting
+        out the one setting in a section used to make the whole config invalid —
+        including the shipped example, if you copied it unedited.
+        """
+        if not isinstance(data, dict):
+            return data
+        known = cls.model_fields
+        return {
+            key: ({} if value is None and key in known else value) for key, value in data.items()
+        }
+
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     entities: EntitiesConfig = Field(default_factory=EntitiesConfig)
     vault: VaultConfig = Field(default_factory=VaultConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    watch: WatchConfig = Field(default_factory=WatchConfig)
+    log: LogConfig = Field(default_factory=LogConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
 

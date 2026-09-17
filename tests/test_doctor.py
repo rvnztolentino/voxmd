@@ -69,7 +69,9 @@ def test_a_complete_setup_passes_and_doctor_creates_nothing(
         "ollama memory",
         "vault",
         "archive",
+        "watch",
         "state",
+        "log",
         "template",
         "entities",
     ]

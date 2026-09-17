@@ -51,7 +51,10 @@ MIN_INLINE_NAME_CHARS = 2
 
 # Characters with inline meaning in CommonMark or Obsidian. All are ASCII
 # punctuation, so a backslash escape is valid for every one of them.
-_MD_SPECIAL = re.compile(r"([\\`*_\[\]<>#|~=$%^&])")
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]<>#|~=$^&])")
+# "%" means something only doubled: "%%" opens an Obsidian comment. A lone one,
+# as in "70%", is left alone so figures read normally in the editor.
+_COMMENT_MARK = re.compile(r"%(?=%)|(?<=%)%")
 # Block syntax that only counts at the start of a line: bullets, ordered-list
 # numbers, and --- / +++ runs. Everything else (#, >, *) is already escaped.
 _BLOCK_START = re.compile(r"^(?:(?P<run>[-+])[-+]*|\d{1,9}(?P<num>[.)]))(?=\s|$)")
@@ -67,6 +70,8 @@ class NoteMeta:
     source: str | None = None
     """The audio file. Only its name is recorded, never the directory."""
     duration_s: float | None = None
+    transcript: str | None = None
+    """The transcript note's vault-relative path without ``.md``, to link to."""
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,7 @@ def build_context(
         "frontmatter": build_frontmatter(meta),
         "title": escape_markdown(extraction.title),
         "summary": _linkify(extraction.summary, pattern, person_links),
+        "key_points": [_linkify(item, pattern, person_links) for item in extraction.key_points],
         "decisions": [_linkify(item, pattern, person_links) for item in extraction.decisions],
         "actions": [_linkify(item, pattern, person_links) for item in extraction.actions],
         "people": _entity_items(extraction.people, people),
@@ -192,7 +198,52 @@ def build_context(
         "time": meta.created.strftime("%H:%M"),
         "source": escape_markdown(source) if source else "",
         "duration": format_duration(meta.duration_s) or "",
+        "transcript": transcript_link(meta.transcript) if meta.transcript else "",
     }
+
+
+TRANSCRIPT_LABEL = "Full transcript"
+SENTENCES_PER_PARAGRAPH = 4
+_SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
+TRANSCRIPT_NOTICE = (
+    "*Transcribed automatically, so words and names may be misheard. "
+    "The recording is the source of truth.*"
+)
+
+
+def transcript_link(path: str) -> str:
+    """``[[folder/name|Full transcript]]`` for a vault-relative note path.
+
+    The path is exact when every part of it is safe inside a link. A folder
+    name holding link syntax (``#``, ``|``, ``]``) falls back to the file name
+    alone, which Obsidian still resolves, rather than to a broken link.
+    """
+    parts = [part for part in path.split("/") if part]
+    if not parts or any(LINK_UNSAFE.search(part) for part in parts):
+        name = LINK_UNSAFE.sub(" ", parts[-1] if parts else "").strip()
+        return f"[[{name}|{TRANSCRIPT_LABEL}]]" if name else ""
+    return f"[[{'/'.join(parts)}|{TRANSCRIPT_LABEL}]]"
+
+
+def render_transcript(text: str, *, title: str, meta: NoteMeta, max_bytes: int) -> str:
+    """The transcript note: frontmatter, a heading, and the words in short paragraphs.
+
+    Every paragraph is escaped exactly like model output. A transcript is just
+    as untrusted: a memo that says "open bracket open bracket" can't make a
+    link, and one that says a URL can't make it load.
+    """
+    words = clean_text(text, limit=max_bytes)
+    if len(words.encode("utf-8")) > max_bytes:
+        # A character limit alone lets three-byte scripts run to triple the size.
+        words = words.encode("utf-8")[: max_bytes - 3].decode("utf-8", errors="ignore") + "…"
+    sentences = [part for part in _SENTENCE_END.split(words) if part]
+    paragraphs = [
+        escape_markdown(" ".join(sentences[i : i + SENTENCES_PER_PARAGRAPH]))
+        for i in range(0, len(sentences), SENTENCES_PER_PARAGRAPH)
+    ]
+    body = "\n\n".join(paragraphs) or "*(nothing was transcribed)*"
+    heading = escape_markdown(f"{title} (transcript)")
+    return f"---\n{build_frontmatter(meta)}---\n\n# {heading}\n\n{body}\n\n{TRANSCRIPT_NOTICE}\n"
 
 
 def build_frontmatter(meta: NoteMeta) -> str:
@@ -211,12 +262,19 @@ def build_frontmatter(meta: NoteMeta) -> str:
 
 def escape_markdown(text: str) -> str:
     """Escape a single line so it renders as the literal text it is."""
-    return _escape_block_start(_MD_SPECIAL.sub(r"\\\1", text))
+    escaped = _COMMENT_MARK.sub(r"\\%", _MD_SPECIAL.sub(r"\\\1", text))
+    return _escape_block_start(escaped)
 
 
 def wikilink(target: str, label: str | None = None) -> str:
     """``[[target]]``, or ``[[target|label]]`` when the text used another spelling."""
-    if label is None or label == target or LINK_UNSAFE.search(label) or _MD_SPECIAL.search(label):
+    if (
+        label is None
+        or label == target
+        or LINK_UNSAFE.search(label)
+        or _MD_SPECIAL.search(label)
+        or "%" in label
+    ):
         return f"[[{target}]]"
     return f"[[{target}|{label}]]"
 

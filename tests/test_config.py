@@ -242,3 +242,91 @@ def test_vault_folder_must_stay_inside_the_vault(tmp_path: Path, folder: str) ->
 def test_an_empty_vault_folder_means_the_vault_root(tmp_path: Path, folder: str) -> None:
     config = load_config(write(tmp_path / "c.yaml", f"vault:\n  folder: {folder}\n"))
     assert config.vault.folder is None
+
+
+class TestWatchAndLog:
+    def test_the_defaults_leave_watching_switched_off(self) -> None:
+        settings = Config()
+        assert settings.watch.dir is None
+        assert settings.log.file is None
+        assert (settings.watch.stable_seconds, settings.watch.poll_seconds) == (3.0, 0.5)
+
+    def test_a_relative_watch_folder_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="watch.dir must be an absolute path"):
+            Config.model_validate({"watch": {"dir": "inbox"}})
+
+    def test_a_relative_log_file_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="log.file must be an absolute path"):
+            Config.model_validate({"log": {"file": "voxmd.log"}})
+
+    def test_a_home_relative_watch_folder_is_expanded(self) -> None:
+        settings = Config.model_validate({"watch": {"dir": "~/inbox"}})
+        assert settings.watch.dir is not None and settings.watch.dir.is_absolute()
+
+    @pytest.mark.parametrize(
+        ("section", "values"),
+        [
+            ("watch", {"stable_seconds": 0.1}),
+            ("watch", {"poll_seconds": 0}),
+            ("watch", {"settle_timeout_s": 0}),
+            ("watch", {"lock_timeout_s": -1}),
+            ("log", {"max_mb": 0}),
+        ],
+    )
+    def test_out_of_range_values_are_refused(self, section: str, values: dict[str, object]) -> None:
+        with pytest.raises(ValidationError):
+            Config.model_validate({section: values})
+
+    def test_a_typo_in_the_watch_section_is_an_error(self) -> None:
+        with pytest.raises(ValidationError, match="stable_second"):
+            Config.model_validate({"watch": {"stable_second": 3}})
+
+
+class TestCommentedOutSections:
+    """A section whose every key is commented out reads as null, not as absent."""
+
+    def test_a_null_section_falls_back_to_its_defaults(self, tmp_path: Path) -> None:
+        config = tmp_path / "voxmd.yaml"
+        config.write_text("archive:\n  # dir: ~/somewhere\nwatch:\n  # dir: ~/inbox\n")
+
+        settings = load_config(config)
+
+        assert settings.archive.dir is None
+        assert settings.watch.stable_seconds == 3.0
+
+    def test_the_shipped_example_config_is_valid(self) -> None:
+        example = Path(__file__).resolve().parents[1] / "voxmd.example.yaml"
+        assert load_config(example).vault.path is not None
+
+    def test_a_null_value_for_an_unknown_key_is_still_an_error(self, tmp_path: Path) -> None:
+        config = tmp_path / "voxmd.yaml"
+        config.write_text("archve:\n")
+        with pytest.raises(ConfigError, match="archve"):
+            load_config(config)
+
+
+class TestTranscriptSettings:
+    def test_transcripts_are_on_by_default_in_their_own_folder(self) -> None:
+        assert Config().vault.transcripts is True
+        assert Config().vault.transcripts_folder == Path("Transcripts")
+
+    @pytest.mark.parametrize("folder", ["/abs", "~/x", "../out", "a/../../b", "", "."])
+    def test_the_transcripts_folder_must_stay_inside_the_notes_folder(self, folder: str) -> None:
+        with pytest.raises(ValidationError, match="transcripts_folder"):
+            Config.model_validate({"vault": {"transcripts_folder": folder}})
+
+    def test_a_nested_transcripts_folder_is_fine(self) -> None:
+        settings = Config.model_validate({"vault": {"transcripts_folder": "Raw/Text"}})
+        assert settings.vault.transcripts_folder == Path("Raw/Text")
+
+
+class TestDuplicates:
+    def test_repeats_are_copied_by_default(self) -> None:
+        assert Config().vault.duplicates == "copy"
+
+    def test_skip_can_be_chosen(self) -> None:
+        assert Config.model_validate({"vault": {"duplicates": "skip"}}).vault.duplicates == "skip"
+
+    def test_anything_else_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="duplicates"):
+            Config.model_validate({"vault": {"duplicates": "overwrite"}})
