@@ -1,8 +1,8 @@
 # Publishes voxmd to PyPI with trusted publishing: no API token is stored
-# anywhere. See the PyPI and TestPyPI "publisher" settings for this repo.
+# anywhere. See the PyPI "publisher" settings for this repo.
 #
 #   Push a tag vX.Y.Z  -> test, build, publish to PyPI.
-#   Run it by hand     -> test, build, publish to TestPyPI only.
+#   Run it by hand     -> test and build only; nothing is published.
 #
 # Actions are pinned to full commit SHAs so a moved tag can't change what runs.
 
@@ -79,24 +79,6 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
-
-  testpypi:
-    if: github.event_name == 'workflow_dispatch'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/voxmd
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          repository-url: https://test.pypi.org/legacy/
 
   pypi:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
